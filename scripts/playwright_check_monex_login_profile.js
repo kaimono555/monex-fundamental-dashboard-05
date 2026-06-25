@@ -30,17 +30,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function waitForEnter() {
-  return new Promise((resolve) => {
-    process.stdin.resume();
-    process.stdin.setEncoding("utf8");
-    process.stdin.once("data", () => {
-      process.stdin.pause();
-      resolve();
-    });
-  });
-}
-
 function compactForLog(text, maxLength = 500) {
   return String(text || "")
     .replace(/\s+/g, " ")
@@ -160,47 +149,56 @@ async function main() {
   writeRunLog(logPath, `login profile check pages opened code=${code} profilePath=${resolvedUserDataDir}`);
 
   if (waitForEnterAndClose) {
+    const reloginTimeoutMs = 5 * 60 * 1000;
+    const reloginDeadlineMs = Date.now() + reloginTimeoutMs;
+    writeRunLog(logPath, `ユーザーログイン待機中（自動検出モード タイムアウト=${reloginTimeoutMs / 1000}秒）`);
     console.log("=========================================");
     console.log("マネックスのログイン期限が切れています。");
     console.log("");
     console.log("開いたブラウザでマネックスへログインしてください。");
-    console.log("");
-    console.log("ログイン後、");
-    console.log("銘柄スカウター（例：7186）が表示できることを確認してから");
-    console.log("Enterキーを押してください。");
-    console.log("================");
-    writeRunLog(logPath, "ユーザーログイン待機中");
+    console.log("銘柄スカウターページが表示されると自動で続行します。");
+    console.log(`（最大${reloginTimeoutMs / 60000}分待機）`);
+    console.log("=========================================");
 
-    await waitForEnter();
+    let lastNotReadyLogAt = 0;
 
-    let page = targetPage;
-    const targetPages = context.pages().filter((candidate) => {
-      const currentUrl = candidate.url();
-      return currentUrl.includes("monex.ifis.co.jp")
-        && currentUrl.includes("sa=report_zaimu")
-        && currentUrl.includes(`bcode=${code}`);
-    });
-    if (targetPages.length > 0) page = targetPages[targetPages.length - 1];
+    while (Date.now() < reloginDeadlineMs) {
+      const pages = context.pages();
+      const matchedPages = pages.filter((p) => {
+        const url = p.url();
+        return url.includes("monex.ifis.co.jp")
+          && url.includes("sa=report_zaimu")
+          && url.includes(`bcode=${code}`);
+      });
 
-    try {
-      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    } catch (_) {
-      // Keep the current page state for diagnostics.
+      for (const p of matchedPages) {
+        const snapshot = await pageSnapshot(p);
+        const result = evaluateFinancialText(snapshot.text, snapshot.html);
+
+        if (result.ok) {
+          const domains = await cookieDomains(context);
+          writeRunLog(logPath, `login profile check success code=${code} currentUrl=${p.url()} cookieDomains=${JSON.stringify(domains)} profilePath=${resolvedUserDataDir}`);
+          writeRunLog(logPath, `login profile check success detail code=${code} metrics=${result.foundMetricLabels.join("|")} financialRows=${result.financialRowCount}`);
+          writeRunLog(logPath, "ユーザーログイン確認→取得再開");
+          try { await context.close(); } catch (_) {}
+          await sleep(2000);
+          process.exit(0);
+        }
+
+        const now = Date.now();
+        if (now - lastNotReadyLogAt >= 30000) {
+          writeRunLog(logPath, `login profile check not-ready code=${code} auth=${result.hasAuthError} marker=${JSON.stringify(result.authMarker)} hasFiscalPeriod=${result.hasFiscalPeriod} financialRows=${result.financialRowCount}`);
+          lastNotReadyLogAt = now;
+        }
+      }
+
+      await sleep(2000);
     }
 
-    const snapshot = await pageSnapshot(page);
-    const result = evaluateFinancialText(snapshot.text, snapshot.html);
-    await writeDiagnostics(context, page, code, logPath, userDataDir, snapshot.text, snapshot.title, result);
-
-    if (result.ok) {
-      writeRunLog(logPath, "ユーザーログイン確認→取得再開");
-      await context.close();
-      process.exit(0);
-    }
-
-    writeRunLog(logPath, `login profile check still auth/error code=${code} auth=${result.hasAuthError} marker=${JSON.stringify(result.authMarker)}`);
-    await context.close();
-    process.exit(2);
+    writeRunLog(logPath, `login profile check relogin_timeout code=${code} timeout=${reloginTimeoutMs / 1000}s`);
+    try { await context.close(); } catch (_) {}
+    await sleep(2000);
+    process.exit(3);
   }
 
   let lastSignature = "";

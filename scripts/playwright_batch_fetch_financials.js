@@ -347,6 +347,31 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
   };
 }
 
+async function waitForChromeProfileRelease(resolvedProfilePath, logPath) {
+  const lockPath = path.join(resolvedProfilePath, "lockfile");
+  const timeoutMs = 30000;
+  const intervalMs = 2000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (!fs.existsSync(lockPath)) return;
+    let locked = false;
+    try {
+      const fd = fs.openSync(lockPath, "r+");
+      fs.closeSync(fd);
+      locked = false;
+    } catch (_) {
+      locked = true;
+    }
+    if (!locked) return;
+    writeRunLog(logPath, `batch fetch waiting for Chrome profile release profilePath=${resolvedProfilePath}`);
+    await sleep(intervalMs);
+  }
+
+  writeRunLog(logPath, `relogin_chrome_still_running profilePath=${resolvedProfilePath} timeout=${timeoutMs / 1000}s`);
+  throw new Error(`relogin_chrome_still_running: Chrome still using profile after ${timeoutMs / 1000}s`);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const codes = (args.codes || "")
@@ -376,6 +401,7 @@ async function main() {
   }
 
   writeRunLog(logPath, `batch fetch start count=${codes.length} userDataDir=${userDataDir} resolvedUserDataDir=${resolvedUserDataDir}`);
+  await waitForChromeProfileRelease(resolvedUserDataDir, logPath);
   const context = await chromium.launchPersistentContext(userDataDir, {
     executablePath: chromeExecutable,
     headless: false,
