@@ -1,0 +1,19 @@
+score_name,rule_order,source_metric,min_value,max_value,points,note
+eps_score,1,eps_yoy,80,,5,最新EPS前年比の最重要評価
+eps_score,2,eps_yoy,40,80,4,最新EPS前年比の高成長
+eps_score,3,eps_yoy,20,40,3,最新EPS前年比の中成長
+eps_score,4,eps_yoy,0,20,2,最新EPS前年比の横ばい圏
+eps_score,5,eps_yoy,,0,0,最新EPS前年比がマイナス
+eps_score,6,eps_3y_cagr,30,,2,3年EPS CAGRの補助評価
+eps_score,7,eps_3y_cagr,10,30,1,3年EPS CAGRの弱い補助評価
+eps_score,8,eps_3y_cagr,,10,0,3年EPS CAGRが低いまたは欠損
+eps_score,9,eps_5y_cagr,20,,1,5年EPS CAGRの補助評価
+eps_score,10,eps_5y_cagr,,20,0,5年EPS CAGRが低いまたは欠損
+revision_score,1,revision_status,profit_up_large,,7,大幅上方修正
+revision_score,2,revision_status,profit_up_mid,,5,強い上方修正
+revision_score,3,revision_status,profit_up_small,,3,小幅上方修正
+revision_score,4,revision_status,sales_up,,1,売上高上方修正
+revision_score,5,revision_status,none,,0,修正なし
+revision_score,6,revision_status,downward,,-3,下方修正
+revision_score,7,revision_status,unknown,,0,判定不能
+final_growth_score,1,formula,,,,"eps_score + revision_score を 0〜15 に丸める"

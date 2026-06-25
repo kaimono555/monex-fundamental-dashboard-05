@@ -1,0 +1,12 @@
+{
+  "name": "monex-scout-fetch-test",
+  "version": "0.1.0",
+  "private": true,
+  "description": "検証用: マネックス銘柄スカウター財務ページ取得テスト",
+  "scripts": {
+    "fetch:chrome-session": "node scripts/playwright_persistent_fetch.js"
+  },
+  "dependencies": {
+    "playwright": "^1.54.0"
+  }
+}

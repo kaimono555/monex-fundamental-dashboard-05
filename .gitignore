@@ -1,0 +1,51 @@
+# npm依存パッケージ
+node_modules/
+
+# Chromeプロファイル（セッション情報・機密・大容量）
+data/playwright-profile/
+
+# 取得済み生データ（大容量・スクリプト再生成可能）
+data/raw/
+
+# 生成済み銘柄別財務CSV
+data/output/
+
+# パイプライン生成ファイル
+data/fetch_results.csv
+data/fetch_status.csv
+data/fundamentals.csv
+data/fundamental_scores.csv
+data/fundamental_scores_before_momentum_removal.csv
+data/fundamental_scores_fallback_only.csv
+data/fundamental_fetch_errors.csv
+data/run_log.txt
+data/fundamental_fetch_summary.md
+data/fundamental_scores.md
+data/fundamental_scores.xlsx
+data/fundamental_scores_fallback_only.md
+data/fundamental_scores_fallback_only.xlsx
+
+# 04からの引き継ぎ生成ファイル
+data/target_codes.csv
+
+# スクリプト生成ファイル（ルート）
+growth_metrics.csv
+growth_score.csv
+
+# ログ
+logs/
+
+# レポート（自動生成）
+reports/
+
+# Excelファイル（バイナリ・自動生成）
+*.xlsx
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Pythonキャッシュ
+__pycache__/
+*.pyc
+*.pyo
