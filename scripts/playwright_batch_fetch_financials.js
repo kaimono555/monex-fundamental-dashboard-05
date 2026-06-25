@@ -1,5 +1,6 @@
 ﻿const fs = require("fs");
 const path = require("path");
+const { detectAuthErrorPage } = require("./auth_detect");
 
 function parseArgs(argv) {
   const args = {};
@@ -114,29 +115,6 @@ function writeCsv(filePath, rows) {
     lines.push(columns.map((column) => csvCell(row[column])).join(","));
   }
   fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf8");
-}
-
-function detectAuthErrorPage(text, html = "") {
-  const haystack = `${text || ""}\n${html || ""}`;
-  const markers = [
-    "隱崎ｨｼ縺輔ｌ縺溘Θ繝ｼ繧ｶ縺ｮ縺ｿ",
-    "隱崎ｨｼ諠・ｱ縺梧ｭ｣縺励￥縺ゅｊ縺ｾ縺帙ｓ",
-    "謖・ｮ壹＆繧後◆URL縺碁俣驕輔▲縺ｦ縺・ｋ",
-    "繝壹・繧ｸ繧定｡ｨ遉ｺ縺ｧ縺阪∪縺帙ｓ",
-    "繝ｭ繧ｰ繧､繝ｳ繝壹・繧ｸ"
-  ];
-  markers.push(
-    "隱崎ｨｼ縺輔ｌ縺溘Θ繝ｼ繧ｶ縺ｮ縺ｿ",
-    "繝壹・繧ｸ繧定｡ｨ遉ｺ縺ｧ縺阪∪縺帙ｓ",
-    "隱崎ｨｼ諠・ｱ縺梧ｭ｣縺励￥縺ゅｊ縺ｾ縺帙ｓ",
-    "繝ｭ繧ｰ繧､繝ｳ繝壹・繧ｸ",
-    "auth_error"
-  );
-  const marker = markers.find((item) => haystack.includes(item));
-  return {
-    detected: Boolean(marker),
-    marker: marker || ""
-  };
 }
 
 function evaluateFinancialText(text, html = "") {

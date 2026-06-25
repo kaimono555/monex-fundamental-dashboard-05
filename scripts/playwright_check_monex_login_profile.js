@@ -1,5 +1,6 @@
-const fs = require("fs");
+﻿const fs = require("fs");
 const path = require("path");
+const { detectAuthErrorPage } = require("./auth_detect");
 
 function parseArgs(argv) {
   const args = {};
@@ -47,21 +48,6 @@ function compactForLog(text, maxLength = 500) {
     .slice(0, maxLength);
 }
 
-function detectAuthErrorPage(text, html = "") {
-  const haystack = `${text || ""}\n${html || ""}`;
-  const markers = [
-    "認証されたユーザのみ",
-    "認証情報が正しくありません",
-    "指定されたURLが間違っている",
-    "ページを表示できません",
-    "ログインページ"
-  ];
-  const marker = markers.find((item) => haystack.includes(item));
-  return {
-    detected: Boolean(marker),
-    marker: marker || ""
-  };
-}
 
 function evaluateFinancialText(text, html = "") {
   const authError = detectAuthErrorPage(text, html);
