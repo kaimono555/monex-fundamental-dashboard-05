@@ -151,15 +151,8 @@ async function main() {
   if (waitForEnterAndClose) {
     const reloginTimeoutMs = 5 * 60 * 1000;
     const reloginDeadlineMs = Date.now() + reloginTimeoutMs;
-    writeRunLog(logPath, `ユーザーログイン待機中（自動検出モード タイムアウト=${reloginTimeoutMs / 1000}秒）`);
-    console.log("=========================================");
-    console.log("マネックスのログイン期限が切れています。");
-    console.log("");
-    console.log("開いたブラウザでマネックスへログインしてください。");
-    console.log("銘柄スカウターページが表示されると自動で続行します。");
-    console.log(`（最大${reloginTimeoutMs / 60000}分待機）`);
-    console.log("=========================================");
 
+    let loginMessageShown = false;
     let lastNotReadyLogAt = 0;
 
     while (Date.now() < reloginDeadlineMs) {
@@ -183,6 +176,17 @@ async function main() {
           try { await context.close(); } catch (_) {}
           await sleep(2000);
           process.exit(0);
+        }
+
+        if (!loginMessageShown) {
+          loginMessageShown = true;
+          writeRunLog(logPath, `ユーザーログイン待機中（自動検出モード タイムアウト=${reloginTimeoutMs / 1000}秒）`);
+          console.log("=========================================");
+          console.log("マネックスのログイン期限が切れています。");
+          console.log("プログラムが開いたブラウザで、5分以内にマネックスへログインしてください。");
+          console.log("ログイン後、銘柄スカウターページが表示されるまで待ってください。");
+          console.log("ログイン確認後に60銘柄の取得を開始します。");
+          console.log("=========================================");
         }
 
         const now = Date.now();

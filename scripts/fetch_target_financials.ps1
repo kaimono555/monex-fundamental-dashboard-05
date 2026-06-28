@@ -115,13 +115,15 @@ function Invoke-UserRelogin {
     param([string]$BCode)
 
     Write-RunLog "認証エラーページ検出→ユーザーへ再ログイン依頼"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_monex_login_profile.ps1") `
+    $reloginOut = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_monex_login_profile.ps1") `
         -BCode $BCode `
         -UserDataDir $UserDataDir `
         -ChromeExecutablePath $chromePath `
         -LogPath $LogPath `
         -WaitForEnterAndClose
-    return $LASTEXITCODE
+    $reloginExitCode = $LASTEXITCODE
+    $reloginOut | Out-Host
+    return [int]$reloginExitCode
 }
 
 Ensure-Directory $RawDir
@@ -156,6 +158,20 @@ foreach ($code in $codes) {
 Write-RunLog "target fetch start count=$($codes.Count)"
 
 $nodeScript = Join-Path $PSScriptRoot "playwright_batch_fetch_financials.js"
+
+Write-RunLog "login pre-check start"
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_monex_login_profile.ps1") `
+    -BCode ([string]$codes[0]) `
+    -UserDataDir $UserDataDir `
+    -ChromeExecutablePath $chromePath `
+    -LogPath $LogPath `
+    -WaitForEnterAndClose
+$loginPreCheckCode = $LASTEXITCODE
+if ($loginPreCheckCode -ne 0) {
+    Write-RunLog "login pre-check failed exit=$loginPreCheckCode; aborting fetch"
+    throw "login pre-check failed (exit=$loginPreCheckCode); fetch aborted"
+}
+Write-RunLog "login pre-check success"
 
 $nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
 $fetchResults = @(Get-FetchResults)
