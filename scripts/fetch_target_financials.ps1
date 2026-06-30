@@ -69,6 +69,59 @@ function ConvertTo-ProcessArgument {
     return '"' + ($Value -replace '"', '\"') + '"'
 }
 
+# 05専用プロファイル（playwright-profile\monex-login-profile）を掴んでいる
+# 残存プロセスだけを安全に検出して終了する。
+# 通常Chromeや他プロジェクトのChrome/Nodeを巻き込まないよう、CommandLineに
+# 以下のいずれかを含むプロセスだけを対象にする：
+#   playwright-profile / monex-login-profile / 05_マネックス銘柄スカウター自動取得 / update_all_05
+# chrome.exe / node.exe を無条件に終了する実装は行わない。
+function Stop-Monex05StaleProcesses {
+    $patterns = @(
+        "playwright-profile",
+        "monex-login-profile",
+        "05_マネックス銘柄スカウター自動取得",
+        "update_all_05"
+    )
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue)
+    } catch {
+        $procs = @()
+    }
+    foreach ($p in $procs) {
+        $cmd = [string]$p.CommandLine
+        if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+        $isTarget = $false
+        foreach ($pat in $patterns) {
+            if ($cmd -like "*$pat*") { $isTarget = $true; break }
+        }
+        if (-not $isTarget) { continue }
+        try {
+            Write-Host "  [cleanup] 残存プロセス終了: PID=$($p.ProcessId) Name=$($p.Name)" -ForegroundColor Gray
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+        } catch {
+            Write-Host "  [cleanup] プロセス終了に失敗 PID=$($p.ProcessId): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+}
+
+# 05専用プロファイル配下のロックファイルだけを削除する（他プロファイルには触れない）。
+function Remove-Monex05LockFiles {
+    param([string]$ResolvedProfileDir)
+    if ([string]::IsNullOrWhiteSpace($ResolvedProfileDir) -or -not (Test-Path -LiteralPath $ResolvedProfileDir)) { return }
+    $lockNames = @("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile")
+    foreach ($name in $lockNames) {
+        $lockPath = Join-Path $ResolvedProfileDir $name
+        if (Test-Path -LiteralPath $lockPath) {
+            try {
+                Remove-Item -LiteralPath $lockPath -Force -ErrorAction Stop
+                Write-Host "  [cleanup] ロックファイル削除: $lockPath" -ForegroundColor Gray
+            } catch {
+                Write-Host "  [cleanup] ロックファイル削除に失敗: $lockPath - $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
 function Invoke-BatchFetch {
     param(
         [string[]]$Codes,
@@ -95,6 +148,22 @@ function Invoke-BatchFetch {
     Remove-Item -LiteralPath $confirmSignalPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $abortSignalPath -Force -ErrorAction SilentlyContinue
 
+    # 05専用プロファイルを起動前に解放しておく（前回異常終了の残存プロセス対策）。
+    Write-Host "  [cleanup] 起動前クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
+    Stop-Monex05StaleProcesses
+    Start-Sleep -Milliseconds 500
+    Remove-Monex05LockFiles -ResolvedProfileDir $resolvedUserDataDir
+
+    # 無人実行（stdinリダイレクト）ではコンソールのキー入力監視ができないため、
+    # ここで一度だけ判定して使い回す。リダイレクトされている場合はKeyAvailableを
+    # 一切呼び出さず、シグナルファイル待機とタイムアウトのみで処理する。
+    $consoleInputAvailable = $false
+    try {
+        $consoleInputAvailable = -not [Console]::IsInputRedirected
+    } catch {
+        $consoleInputAvailable = $false
+    }
+
     $nodeArgs = @(
         $NodeScript,
         "--codes", ($Codes -join ","),
@@ -110,6 +179,7 @@ function Invoke-BatchFetch {
     $argumentList = ($nodeArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "
     $process = Start-Process -FilePath "node" -ArgumentList $argumentList -NoNewWindow -PassThru
 
+    try {
     $reloginPromptShown = $false
     while (-not $process.HasExited) {
         if (-not $reloginPromptShown -and (Test-Path -LiteralPath $needSignalPath)) {
@@ -130,7 +200,7 @@ function Invoke-BatchFetch {
 
             while ((Get-Date) -lt $deadline) {
                 if ($process.HasExited) { break }
-                if ([Console]::KeyAvailable) {
+                if ($consoleInputAvailable -and [Console]::KeyAvailable) {
                     $key = [Console]::ReadKey($true)
                     if ($key.Key -eq "Enter") { $confirmed = $true; break }
                 }
@@ -170,6 +240,22 @@ function Invoke-BatchFetch {
     Remove-Item -LiteralPath $abortSignalPath -Force -ErrorAction SilentlyContinue
 
     return [int]$process.ExitCode
+    }
+    finally {
+        # 正常終了・異常終了どちらでも、05専用プロファイルを使い終えたら必ず後始末する。
+        if (-not $process.HasExited) {
+            try {
+                Write-Host "  [cleanup] nodeプロセスが残っているため終了します: PID=$($process.Id)" -ForegroundColor Gray
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            } catch {
+                Write-Host "  [cleanup] nodeプロセス終了に失敗 PID=$($process.Id): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+        Start-Sleep -Milliseconds 500
+        Write-Host "  [cleanup] 終了後クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
+        Stop-Monex05StaleProcesses
+        Remove-Monex05LockFiles -ResolvedProfileDir $resolvedUserDataDir
+    }
 }
 
 function Get-FetchResults {

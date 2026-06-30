@@ -66,6 +66,61 @@ function Write-WarnBox($msg) {
     Write-Host "----------------------------------------------------" -ForegroundColor Yellow
 }
 
+# 05専用プロファイル（playwright-profile\monex-login-profile）を掴んでいる
+# 残存プロセスだけを安全に検出して終了する。
+# 通常Chromeや他プロジェクトのChrome/Nodeを巻き込まないよう、CommandLineに
+# 以下のいずれかを含むプロセスだけを対象にする：
+#   playwright-profile / monex-login-profile / 05_マネックス銘柄スカウター自動取得 / update_all_05
+# chrome.exe / node.exe を無条件に終了する実装は行わない。
+function Stop-Monex05StaleProcesses {
+    $patterns = @(
+        "playwright-profile",
+        "monex-login-profile",
+        "05_マネックス銘柄スカウター自動取得",
+        "update_all_05"
+    )
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue)
+    } catch {
+        $procs = @()
+    }
+    foreach ($p in $procs) {
+        $cmd = [string]$p.CommandLine
+        if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+        $isTarget = $false
+        foreach ($pat in $patterns) {
+            if ($cmd -like "*$pat*") { $isTarget = $true; break }
+        }
+        if (-not $isTarget) { continue }
+        try {
+            Write-Host "  [cleanup] 残存プロセス終了: PID=$($p.ProcessId) Name=$($p.Name)" -ForegroundColor Gray
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+        } catch {
+            Write-Host "  [cleanup] プロセス終了に失敗 PID=$($p.ProcessId): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+}
+
+# 05専用プロファイル配下のロックファイルだけを削除する（他プロファイルには触れない）。
+function Remove-Monex05LockFiles {
+    param([string]$ResolvedProfileDir)
+    if ([string]::IsNullOrWhiteSpace($ResolvedProfileDir) -or -not (Test-Path -LiteralPath $ResolvedProfileDir)) { return }
+    $lockNames = @("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile")
+    foreach ($name in $lockNames) {
+        $lockPath = Join-Path $ResolvedProfileDir $name
+        if (Test-Path -LiteralPath $lockPath) {
+            try {
+                Remove-Item -LiteralPath $lockPath -Force -ErrorAction Stop
+                Write-Host "  [cleanup] ロックファイル削除: $lockPath" -ForegroundColor Gray
+            } catch {
+                Write-Host "  [cleanup] ロックファイル削除に失敗: $lockPath - $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
+$MonexProfileDir = Join-Path $ProjectDir "data\playwright-profile\monex-login-profile"
+
 try {
     Start-Transcript -Path $LogPath | Out-Null
 
@@ -81,6 +136,11 @@ try {
     Write-Host ""
     Write-Host "注意: マネックスのログインセッションが切れている場合、Chromeが開いて" -ForegroundColor Yellow
     Write-Host "      手動ログインを求められることがあります（最大5分待機）。" -ForegroundColor Yellow
+
+    Write-Host ""
+    Write-Host "[cleanup] 実行前クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
+    Stop-Monex05StaleProcesses
+    Remove-Monex05LockFiles -ResolvedProfileDir $MonexProfileDir
 
     try {
         Write-Step 1 $TOTAL "git status"
@@ -248,6 +308,11 @@ try {
         Write-Host $_.Exception.Message -ForegroundColor Red
         Write-Host "====================================================" -ForegroundColor Red
     }
+
+    Write-Host ""
+    Write-Host "[cleanup] 終了後クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
+    Stop-Monex05StaleProcesses
+    Remove-Monex05LockFiles -ResolvedProfileDir $MonexProfileDir
 }
 finally {
     try { Stop-Transcript | Out-Null } catch {}
