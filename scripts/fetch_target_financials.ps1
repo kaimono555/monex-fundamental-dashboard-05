@@ -63,12 +63,6 @@ function Get-LatestPeriod([string]$CsvPath) {
     return Get-Field $rows[-1] 0
 }
 
-function ConvertTo-ProcessArgument {
-    param([string]$Value)
-    if ($null -eq $Value) { return '""' }
-    return '"' + ($Value -replace '"', '\"') + '"'
-}
-
 # 05専用プロファイル（playwright-profile\monex-login-profile）を掴んでいる
 # 残存プロセスだけを安全に検出して終了する。
 # 通常Chromeや他プロジェクトのChrome/Nodeを巻き込まないよう、CommandLineに
@@ -133,36 +127,17 @@ function Invoke-BatchFetch {
         Remove-Item -LiteralPath $FetchResultsPath -Force
     }
 
-    # ログイン確認と60銘柄取得は、同一nodeプロセス・同一persistent context内で
-    # 行わせる（playwright_batch_fetch_financials.js側のensureLoginReady）。
-    # 別contextで再ログイン確認してからこのcontextへ引き継ぐ方式は、ブラウザの
-    # 完全な再起動（close→再launch）を挟むとIFIS側の認証が失われるため使用しない。
-    # Enter確認のUIはこのPowerShellプロセス側で行う必要があるため
-    # （process.stdinをnode側で読む方式はsubprocessチェーンで機能しない）、
-    # nodeはStart-Processで非同期起動し、シグナルファイルでやり取りする。
+    # 本スクリプトは自動実行モード専用。人間の入力（Enter確認）は一切待たない。
+    # ログインが切れている場合はplaywright_batch_fetch_financials.js側が即座に
+    # exitCode=3を返して終了する（待機なし）。マネックスへの手動ログイン更新は
+    # scripts\login_monex_profile_05.ps1（専用スクリプト）でのみ行う設計とする。
     $resolvedUserDataDir = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $UserDataDir))
-    $needSignalPath    = Join-Path $resolvedUserDataDir ".relogin_needed_signal"
-    $confirmSignalPath = Join-Path $resolvedUserDataDir ".relogin_confirm_signal"
-    $abortSignalPath   = Join-Path $resolvedUserDataDir ".relogin_abort_signal"
-    Remove-Item -LiteralPath $needSignalPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $confirmSignalPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $abortSignalPath -Force -ErrorAction SilentlyContinue
 
     # 05専用プロファイルを起動前に解放しておく（前回異常終了の残存プロセス対策）。
     Write-Host "  [cleanup] 起動前クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
     Stop-Monex05StaleProcesses
     Start-Sleep -Milliseconds 500
     Remove-Monex05LockFiles -ResolvedProfileDir $resolvedUserDataDir
-
-    # 無人実行（stdinリダイレクト）ではコンソールのキー入力監視ができないため、
-    # ここで一度だけ判定して使い回す。リダイレクトされている場合はKeyAvailableを
-    # 一切呼び出さず、シグナルファイル待機とタイムアウトのみで処理する。
-    $consoleInputAvailable = $false
-    try {
-        $consoleInputAvailable = -not [Console]::IsInputRedirected
-    } catch {
-        $consoleInputAvailable = $false
-    }
 
     $nodeArgs = @(
         $NodeScript,
@@ -176,86 +151,25 @@ function Invoke-BatchFetch {
         "--retry-delay-ms", ([string]$RetryDelayMs),
         "--request-delay-ms", ([string]$RequestDelayMs)
     )
-    $argumentList = ($nodeArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "
-    $process = Start-Process -FilePath "node" -ArgumentList $argumentList -NoNewWindow -PassThru
 
+    # 自動実行モードでは人間入力を待たないため、Start-Process(非同期起動+ポーリング)
+    # ではなく呼び出し演算子で同期実行する。これによりnodeの標準出力がそのまま
+    # このPowerShellコンソール/トランスクリプトに流れ、終了コードも$LASTEXITCODEで
+    # 確実に取得できる（Start-Process -NoNewWindow -PassThru は .ExitCode が
+    # 正しく取得できない場合があるため使用しない）。
+    $nodeExitCode = 0
     try {
-    $reloginPromptShown = $false
-    while (-not $process.HasExited) {
-        if (-not $reloginPromptShown -and (Test-Path -LiteralPath $needSignalPath)) {
-            $reloginPromptShown = $true
-            Write-Host ""
-            Write-Host "=========================================" -ForegroundColor Yellow
-            Write-Host "マネックスログインが必要です。" -ForegroundColor Yellow
-            Write-Host "マネックスにログインしただけでは不十分です。" -ForegroundColor Yellow
-            Write-Host "必ずマネックス本体メニューから銘柄スカウターを開き、" -ForegroundColor Yellow
-            Write-Host "$($Codes[0]) などの銘柄スカウター財務ページが正常に表示されていることを確認してから" -ForegroundColor Yellow
-            Write-Host "Enterを押してください。" -ForegroundColor Yellow
-            Write-Host "=========================================" -ForegroundColor Yellow
-
-            $waitTimeoutMs = 5 * 60 * 1000
-            $deadline = (Get-Date).AddMilliseconds($waitTimeoutMs)
-            $lastStatusAt = Get-Date
-            $confirmed = $false
-
-            while ((Get-Date) -lt $deadline) {
-                if ($process.HasExited) { break }
-                if ($consoleInputAvailable -and [Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true)
-                    if ($key.Key -eq "Enter") { $confirmed = $true; break }
-                }
-                if (((Get-Date) - $lastStatusAt).TotalSeconds -ge 30) {
-                    $remaining = [int](($deadline - (Get-Date)).TotalSeconds)
-                    Write-Host "  ...待機中（残り約 $remaining 秒）。ログイン・銘柄スカウター表示後にEnterを押してください。" -ForegroundColor Gray
-                    Write-RunLog "batch fetch waiting-for-enter (powershell side) remaining=${remaining}s"
-                    $lastStatusAt = Get-Date
-                }
-                Start-Sleep -Milliseconds 200
-            }
-
-            if (-not $process.HasExited) {
-                if (-not $confirmed) {
-                    Write-RunLog "batch fetch timeout waiting for user Enter confirmation"
-                    New-Item -ItemType File -Path $abortSignalPath -Force | Out-Null
-                    Write-Host ""
-                    Write-Host "=========================================" -ForegroundColor Red
-                    Write-Host "5分以内にEnterが押されなかったため、再ログイン確認はタイムアウトしました。" -ForegroundColor Red
-                    Write-Host "次の手順を確認してください：" -ForegroundColor Red
-                    Write-Host "  1. 開いたChromeでマネックス証券にログインできているか確認する" -ForegroundColor Red
-                    Write-Host "  2. マネックス本体のメニューから銘柄スカウターが正常に表示されるか確認する" -ForegroundColor Red
-                    Write-Host "  3. 表示できる状態になったら run_05_update.bat を再実行する" -ForegroundColor Red
-                    Write-Host "=========================================" -ForegroundColor Red
-                } else {
-                    Write-Host ""
-                    Write-Host "ログイン状態を再チェックしています..." -ForegroundColor Cyan
-                    New-Item -ItemType File -Path $confirmSignalPath -Force | Out-Null
-                }
-            }
-        }
-        Start-Sleep -Milliseconds 300
-    }
-
-    Remove-Item -LiteralPath $needSignalPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $confirmSignalPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $abortSignalPath -Force -ErrorAction SilentlyContinue
-
-    return [int]$process.ExitCode
+        & node $nodeArgs
+        $nodeExitCode = $LASTEXITCODE
     }
     finally {
         # 正常終了・異常終了どちらでも、05専用プロファイルを使い終えたら必ず後始末する。
-        if (-not $process.HasExited) {
-            try {
-                Write-Host "  [cleanup] nodeプロセスが残っているため終了します: PID=$($process.Id)" -ForegroundColor Gray
-                Stop-Process -Id $process.Id -Force -ErrorAction Stop
-            } catch {
-                Write-Host "  [cleanup] nodeプロセス終了に失敗 PID=$($process.Id): $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-        }
-        Start-Sleep -Milliseconds 500
         Write-Host "  [cleanup] 終了後クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
         Stop-Monex05StaleProcesses
         Remove-Monex05LockFiles -ResolvedProfileDir $resolvedUserDataDir
     }
+
+    return $nodeExitCode
 }
 
 function Get-FetchResults {
@@ -298,12 +212,25 @@ Write-RunLog "target fetch start count=$($codes.Count)"
 
 $nodeScript = Join-Path $PSScriptRoot "playwright_batch_fetch_financials.js"
 
-# ログイン確認(必要な場合のEnter確認待ちを含む)と60銘柄取得は、Invoke-BatchFetch が
-# 起動する単一のnodeプロセス・単一のpersistent context内で行う
-# （playwright_batch_fetch_financials.js の ensureLoginReady）。
+# ログイン確認と60銘柄取得は、Invoke-BatchFetch が起動する単一のnodeプロセス・
+# 単一のpersistent context内で行う（playwright_batch_fetch_financials.js の
+# ensureLoginReady）。本スクリプトは自動実行モード専用のため、ログインが切れて
+# いる場合は人間の入力を待たずに即座に失敗する（exitCode=3）。
 # ログインが既に有効な場合は人間の操作なしにそのまま取得が始まる。
 $nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
 $fetchResults = @(Get-FetchResults)
+
+if ($nodeExitCode -eq 3) {
+    Write-RunLog "target fetch aborted: login not ready (automated mode, no human wait)"
+    Write-Host ""
+    Write-Host "=========================================" -ForegroundColor Red
+    Write-Host "05専用マネックスプロファイルが未ログイン、またはログイン切れです。" -ForegroundColor Red
+    Write-Host "自動実行モードのため、この画面ではログイン待ちは行いません。" -ForegroundColor Red
+    Write-Host "先に scripts\login_monex_profile_05.ps1 を手動実行して、マネックスへログイン状態を保存してください。" -ForegroundColor Red
+    Write-Host "その後、親バッチ run_all_04_05_04_06.bat を再実行してください。" -ForegroundColor Red
+    Write-Host "=========================================" -ForegroundColor Red
+    throw "05専用マネックスプロファイルが未ログインのため停止しました。scripts\login_monex_profile_05.ps1 を実行してください。"
+}
 
 if ($nodeExitCode -ne 0 -and $fetchResults.Count -eq 0) {
     Write-RunLog "target fetch fatal no fetch result rows exitCode=$nodeExitCode; aborting before fallback"

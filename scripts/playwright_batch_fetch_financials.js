@@ -444,78 +444,13 @@ async function checkLoginReady(context, code, logPath, userDataDir) {
   }
 }
 
-// PowerShell側(fetch_target_financials.ps1のInvoke-BatchFetch)がこのプロセスの
-// stdoutを共有コンソールに直接流しつつ、シグナルファイルでEnter確認を伝える。
-// process.stdinをこのnodeプロセス側で読む方式は subprocess チェーンで機能しないため使用しない。
-async function waitForReloginConfirmation(context, code, logPath, userDataDir) {
-  const resolvedDir = path.resolve(userDataDir);
-  const needSignalPath = path.join(resolvedDir, ".relogin_needed_signal");
-  const confirmSignalPath = path.join(resolvedDir, ".relogin_confirm_signal");
-  const abortSignalPath = path.join(resolvedDir, ".relogin_abort_signal");
-
-  try { fs.unlinkSync(confirmSignalPath); } catch (_) {}
-  try { fs.unlinkSync(abortSignalPath); } catch (_) {}
-  fs.writeFileSync(needSignalPath, String(Date.now()), "utf8");
-
-  writeRunLog(logPath, `ユーザーログイン待機中（Enter確認待ちモード）code=${code}`);
-
-  const loginPage = await context.newPage();
-  try {
-    await loginPage.goto("https://www.monex.co.jp/", { waitUntil: "domcontentloaded", timeout: 45000 });
-  } catch (error) {
-    writeRunLog(logPath, `relogin login page open failed code=${code} error=${error.message}`);
-  }
-
-  const reloginTimeoutMs = 5 * 60 * 1000;
-  const deadline = Date.now() + reloginTimeoutMs;
-  let lastStatusLogAt = Date.now();
-  let confirmed = false;
-
-  while (Date.now() < deadline) {
-    if (fs.existsSync(abortSignalPath)) {
-      writeRunLog(logPath, `login readiness wait aborted code=${code} reason=timeout reported by PowerShell side`);
-      break;
-    }
-    if (fs.existsSync(confirmSignalPath)) {
-      confirmed = true;
-      break;
-    }
-    const now = Date.now();
-    if (now - lastStatusLogAt >= 30000) {
-      writeRunLog(logPath, `login readiness waiting-for-enter code=${code} remaining=${Math.round((deadline - now) / 1000)}s`);
-      lastStatusLogAt = now;
-    }
-    await sleep(1000);
-  }
-
-  try { fs.unlinkSync(needSignalPath); } catch (_) {}
-  try { fs.unlinkSync(confirmSignalPath); } catch (_) {}
-  try { fs.unlinkSync(abortSignalPath); } catch (_) {}
-  await closePageQuietly(loginPage);
-
-  return confirmed;
-}
-
-// 取得に使うcontextそのものでログイン準備を確認・確保する。
-// 既に有効ならすぐtrueを返す（通常の100%成功時はここで人間の操作なしに進む）。
-// 無効な場合のみEnter確認待ちを行い、確認後に同じcontextで再確認する。
+// 本スクリプトは自動実行モード専用であり、人間の入力（Enter確認）は一切待たない。
+// ログインが有効ならすぐtrueを返し、無効な場合は即座にfalseを返して終了する。
+// マネックスへの手動ログイン更新は scripts/login_monex_profile_05.ps1（専用スクリプト）でのみ行う。
 async function ensureLoginReady(context, code, logPath, userDataDir) {
-  if (await checkLoginReady(context, code, logPath, userDataDir)) {
-    return true;
-  }
-
-  const confirmed = await waitForReloginConfirmation(context, code, logPath, userDataDir);
-  if (!confirmed) {
-    writeRunLog(logPath, `relogin_timeout code=${code} (waiting for user Enter confirmation)`);
-    return false;
-  }
-
-  writeRunLog(logPath, `login profile check user confirmed code=${code}; verifying with fetch context`);
   const ok = await checkLoginReady(context, code, logPath, userDataDir);
   if (!ok) {
-    printRed("Enter後の再チェックは通りましたが、取得用ブラウザで銘柄ページを開くと認証が失われました。");
-    printRed("マネックス本体メニューから銘柄スカウターを開いた画面と、取得用ブラウザの認証状態が一致していません。");
-    printRed("スクリプト側のcontext引き継ぎを確認してください。");
+    writeRunLog(logPath, `login not ready code=${code} (automated mode, no human wait. run login_monex_profile_05.ps1)`);
   }
   return ok;
 }

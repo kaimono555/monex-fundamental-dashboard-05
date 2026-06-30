@@ -9,9 +9,12 @@
 #           generate_fundamentals.ps1 → generate_fundamental_scores.ps1 →
 #           generate_fundamental_report.ps1 → 04側候補再生成 →
 #           generate_fundamental_fetch_summary.ps1 まで一括実行される
-#         → 注意: マネックスのセッションが切れている場合、Chromeが自動で開き
-#           手動ログインを待つ仕様（CLAUDE.md記載の確定ルール）。
-#           その間この画面は run_project.ps1 の完了まで進まない。
+#         → 本スクリプトは自動実行モード専用。05専用Chromeプロファイルに
+#           ログイン状態が既に保存されている前提で取得し、人間の入力は
+#           一切待たない。ログイン切れ・未ログインの場合は安全に失敗して
+#           終了する（commit/pushしない）。
+#           マネックスへの手動ログイン更新は scripts\login_monex_profile_05.ps1
+#           （専用スクリプト）で行うこと。
 #   [3/11] reports/fundamental_scores.md 存在確認
 #   [4/11] reports/fundamental_fetch_summary.md 存在確認
 #   [5/11] 必須文字列チェック（05の実ファイルから採取した文言）
@@ -134,8 +137,9 @@ try {
     Write-Host "ログ:" -ForegroundColor Gray
     Write-Host "  logs\$LogFileName"
     Write-Host ""
-    Write-Host "注意: マネックスのログインセッションが切れている場合、Chromeが開いて" -ForegroundColor Yellow
-    Write-Host "      手動ログインを求められることがあります（最大5分待機）。" -ForegroundColor Yellow
+    Write-Host "注意: 自動実行モードのため、05専用Chromeプロファイルに保存済みの" -ForegroundColor Yellow
+    Write-Host "      ログイン状態のみを使用します（人間の入力待ちは行いません）。" -ForegroundColor Yellow
+    Write-Host "      ログイン切れの場合は scripts\login_monex_profile_05.ps1 で更新してください。" -ForegroundColor Yellow
 
     Write-Host ""
     Write-Host "[cleanup] 実行前クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
