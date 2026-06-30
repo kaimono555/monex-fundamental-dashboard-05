@@ -38,7 +38,13 @@ function compactForLog(text, maxLength = 500) {
 }
 
 
-function evaluateFinancialText(text, html = "") {
+function isOnExpectedScoutPage(currentUrl, code) {
+  return currentUrl.includes("monex.ifis.co.jp")
+    && currentUrl.includes("sa=report_zaimu")
+    && currentUrl.includes(`bcode=${code}`);
+}
+
+function evaluateFinancialText(text, html = "", currentUrl = "", code = "") {
   const authError = detectAuthErrorPage(text, html);
   const hasFiscalPeriod = /\d{4}\/\d{2}/.test(text);
   const metricLabels = ["売上高", "営業利益", "経常利益", "当期利益", "EPS"];
@@ -46,10 +52,16 @@ function evaluateFinancialText(text, html = "") {
   const financialRows = text
     .split(/\r?\n/)
     .filter((line) => /^\d{4}\/\d{2}\b/.test(line.trim()) && line.split("\t").length >= 9);
+  // currentUrl/code が渡された場合のみ、銘柄スカウター財務ページ上に留まっているかも判定する。
+  // マネックス本体ログインのみでIFIS側の認証が渡らないと、対象URLを開いても
+  // マネックス本体トップ等へリダイレクトされ、ページ内テキストには認証エラー文言が
+  // 出ないまま財務情報も無い、という状態になり得るため、URLでの確認を必須にする。
+  const onExpectedPage = currentUrl ? isOnExpectedScoutPage(currentUrl, code) : true;
   return {
-    ok: !authError.detected && hasFiscalPeriod && foundMetricLabels.length >= 4 && financialRows.length > 0,
+    ok: !authError.detected && onExpectedPage && hasFiscalPeriod && foundMetricLabels.length >= 4 && financialRows.length > 0,
     hasAuthError: authError.detected,
     authMarker: authError.marker,
+    onExpectedPage,
     hasFiscalPeriod,
     foundMetricLabels,
     financialRowCount: financialRows.length
@@ -143,67 +155,78 @@ async function main() {
 
   const loginPage = context.pages()[0] || await context.newPage();
   await loginPage.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-
-  const targetPage = await context.newPage();
-  await targetPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-  writeRunLog(logPath, `login profile check pages opened code=${code} profilePath=${resolvedUserDataDir}`);
+  writeRunLog(logPath, `login profile check login page opened code=${code} profilePath=${resolvedUserDataDir}`);
 
   if (waitForEnterAndClose) {
+    // monex.ifis.co.jp の直リンクは、マネックス本体メニュー経由の正規遷移を経ないと
+    // 認証が渡らない（直接開くと「認証情報が正しくありません」のまま変化しない）。
+    // そのためここでは対象URLを開かず、PowerShell側でのEnter確認シグナルを待ってから
+    // 初めて対象URLを開いて再チェックする。
     const reloginTimeoutMs = 5 * 60 * 1000;
     const reloginDeadlineMs = Date.now() + reloginTimeoutMs;
+    const confirmSignalPath = path.join(resolvedUserDataDir, ".relogin_confirm_signal");
+    const abortSignalPath = path.join(resolvedUserDataDir, ".relogin_abort_signal");
 
-    let loginMessageShown = false;
-    let lastNotReadyLogAt = 0;
+    try { fs.unlinkSync(confirmSignalPath); } catch (_) {}
+    try { fs.unlinkSync(abortSignalPath); } catch (_) {}
 
+    writeRunLog(logPath, `ユーザーログイン待機中（Enter確認待ちモード タイムアウト=${reloginTimeoutMs / 1000}秒）`);
+
+    let lastStatusLogAt = Date.now();
+    let confirmed = false;
     while (Date.now() < reloginDeadlineMs) {
-      const pages = context.pages();
-      const matchedPages = pages.filter((p) => {
-        const url = p.url();
-        return url.includes("monex.ifis.co.jp")
-          && url.includes("sa=report_zaimu")
-          && url.includes(`bcode=${code}`);
-      });
-
-      for (const p of matchedPages) {
-        const snapshot = await pageSnapshot(p);
-        const result = evaluateFinancialText(snapshot.text, snapshot.html);
-
-        if (result.ok) {
-          const domains = await cookieDomains(context);
-          writeRunLog(logPath, `login profile check success code=${code} currentUrl=${p.url()} cookieDomains=${JSON.stringify(domains)} profilePath=${resolvedUserDataDir}`);
-          writeRunLog(logPath, `login profile check success detail code=${code} metrics=${result.foundMetricLabels.join("|")} financialRows=${result.financialRowCount}`);
-          writeRunLog(logPath, "ユーザーログイン確認→取得再開");
-          try { await context.close(); } catch (_) {}
-          await sleep(2000);
-          process.exit(0);
-        }
-
-        if (!loginMessageShown) {
-          loginMessageShown = true;
-          writeRunLog(logPath, `ユーザーログイン待機中（自動検出モード タイムアウト=${reloginTimeoutMs / 1000}秒）`);
-          console.log("=========================================");
-          console.log("マネックスのログイン期限が切れています。");
-          console.log("プログラムが開いたブラウザで、5分以内にマネックスへログインしてください。");
-          console.log("ログイン後、銘柄スカウターページが表示されるまで待ってください。");
-          console.log("ログイン確認後に60銘柄の取得を開始します。");
-          console.log("=========================================");
-        }
-
-        const now = Date.now();
-        if (now - lastNotReadyLogAt >= 30000) {
-          writeRunLog(logPath, `login profile check not-ready code=${code} auth=${result.hasAuthError} marker=${JSON.stringify(result.authMarker)} hasFiscalPeriod=${result.hasFiscalPeriod} financialRows=${result.financialRowCount}`);
-          lastNotReadyLogAt = now;
-        }
+      if (fs.existsSync(abortSignalPath)) {
+        writeRunLog(logPath, `login profile check aborted code=${code} reason=timeout reported by PowerShell side`);
+        break;
       }
-
-      await sleep(2000);
+      if (fs.existsSync(confirmSignalPath)) {
+        confirmed = true;
+        break;
+      }
+      const now = Date.now();
+      if (now - lastStatusLogAt >= 30000) {
+        const remainingSec = Math.round((reloginDeadlineMs - now) / 1000);
+        writeRunLog(logPath, `login profile check waiting-for-enter code=${code} remaining=${remainingSec}s`);
+        lastStatusLogAt = now;
+      }
+      await sleep(1000);
     }
 
-    writeRunLog(logPath, `login profile check relogin_timeout code=${code} timeout=${reloginTimeoutMs / 1000}s`);
+    try { fs.unlinkSync(confirmSignalPath); } catch (_) {}
+    try { fs.unlinkSync(abortSignalPath); } catch (_) {}
+
+    if (!confirmed) {
+      writeRunLog(logPath, `login profile check relogin_timeout code=${code} timeout=${reloginTimeoutMs / 1000}s (waiting for user Enter confirmation)`);
+      try { await context.close(); } catch (_) {}
+      await sleep(2000);
+      process.exit(3);
+    }
+
+    writeRunLog(logPath, `login profile check user confirmed code=${code}; opening target page for recheck`);
+
+    const targetPage = await context.newPage();
+    await targetPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    const snapshot = await pageSnapshot(targetPage);
+    const result = evaluateFinancialText(snapshot.text, snapshot.html, targetPage.url(), code);
+    await writeDiagnostics(context, targetPage, code, logPath, userDataDir, snapshot.text, snapshot.title, result);
+
+    if (result.ok) {
+      writeRunLog(logPath, `login profile check success code=${code} currentUrl=${targetPage.url()}`);
+      writeRunLog(logPath, "ユーザーログイン確認→取得再開");
+      try { await context.close(); } catch (_) {}
+      await sleep(2000);
+      process.exit(0);
+    }
+
+    writeRunLog(logPath, `login profile check recheck_failed code=${code} currentUrl=${targetPage.url()} onExpectedPage=${result.onExpectedPage} authMarker=${JSON.stringify(result.authMarker)} hasFiscalPeriod=${result.hasFiscalPeriod} metrics=${result.foundMetricLabels.join("|")} financialRows=${result.financialRowCount}`);
     try { await context.close(); } catch (_) {}
     await sleep(2000);
     process.exit(3);
   }
+
+  const targetPage = await context.newPage();
+  await targetPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+  writeRunLog(logPath, `login profile check pages opened code=${code} profilePath=${resolvedUserDataDir}`);
 
   let lastSignature = "";
   while (true) {
@@ -217,7 +240,7 @@ async function main() {
 
     for (const page of targetPages) {
       const snapshot = await pageSnapshot(page);
-      const result = evaluateFinancialText(snapshot.text, snapshot.html);
+      const result = evaluateFinancialText(snapshot.text, snapshot.html, page.url(), code);
       const domains = await cookieDomains(context);
       const signature = [
         page.url(),

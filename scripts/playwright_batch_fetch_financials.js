@@ -61,6 +61,10 @@ function formatSeconds(ms, digits = 1) {
   return (ms / 1000).toFixed(digits);
 }
 
+function printRed(message) {
+  console.log(`\x1b[31m${message}\x1b[0m`);
+}
+
 function compactForLog(text, maxLength = 500) {
   return String(text || "")
     .replace(/\s+/g, " ")
@@ -235,6 +239,7 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
       lastErrorType = "timeout_error";
       lastErrorMessage = "銘柄取得タイムアウト 60秒";
       writeRunLog(logPath, `fetch timeout code=${code} attempt=${attempt} message=${lastErrorMessage}`);
+      printRed(`[ERROR] code=${code} 60秒以内に取得できませんでした（タイムアウト）。この銘柄をスキップします。`);
       break;
     }
     try {
@@ -273,6 +278,7 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
         lastErrorType = "timeout_error";
         lastErrorMessage = "銘柄取得タイムアウト 60秒";
         writeRunLog(logPath, `fetch timeout code=${code} attempt=${attempt} message=${lastErrorMessage}`);
+        printRed(`[ERROR] code=${code} 60秒以内に銘柄スカウター財務ページが表示されませんでした（タイムアウト）。この銘柄をスキップします。`);
         break;
       }
       fs.writeFileSync(htmlPath, pageData.html, "utf8");
@@ -301,6 +307,9 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
       if (result.hasAuthError) {
         lastErrorType = "auth_error";
         lastErrorMessage = "authentication page detected";
+        printRed("マネックス銘柄スカウターの認証が有効ではありません。");
+        printRed("Chromeでマネックス本体にログイン後、必ず本体メニューから銘柄スカウターを開き、");
+        printRed("銘柄スカウターの画面が正常表示された状態でEnterを押してください。");
       } else if (!result.hasFiscalPeriod) {
         lastErrorType = "financial_markers_not_found";
         lastErrorMessage = "fiscal period not found";
@@ -372,6 +381,145 @@ async function waitForChromeProfileRelease(resolvedProfilePath, logPath) {
   throw new Error(`relogin_chrome_still_running: Chrome still using profile after ${timeoutMs / 1000}s`);
 }
 
+function isOnExpectedScoutPage(currentUrl, code) {
+  return currentUrl.includes("monex.ifis.co.jp")
+    && currentUrl.includes("sa=report_zaimu")
+    && currentUrl.includes(`bcode=${code}`);
+}
+
+// ログイン状態の確認は、実際に取得に使う context で直接該当銘柄ページを開いて行う。
+// 別contextで確認してからこのcontextへ引き継ぐ方式は、ブラウザ再起動を挟むとIFIS側の
+// 認証が失われることが判明したため使用しない（context closeを伴う再起動をしない）。
+// 財務テーブルはJS描画が完了するまで時間がかかることがあるため、fetchOneと同様に
+// 数回ポーリングしてから判定する（1回限りの即時判定だと未ログインと誤判定しやすい）。
+async function checkLoginReady(context, code, logPath, userDataDir) {
+  const url = `https://monex.ifis.co.jp/index.php?sa=report_zaimu&bcode=${code}`;
+  const page = await context.newPage();
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+
+    const deadlineMs = Date.now() + 15000;
+    let lastText = "";
+    let lastResult = evaluateFinancialText("");
+    let onExpectedPage = isOnExpectedScoutPage(page.url(), code);
+
+    while (Date.now() < deadlineMs) {
+      try {
+        await page.waitForLoadState("domcontentloaded", { timeout: 3000 });
+      } catch (_) {
+        // Continue with current DOM.
+      }
+      let text = "";
+      try {
+        text = await page.locator("body").innerText({ timeout: 2000 });
+      } catch (_) {
+        text = "";
+      }
+      let html = "";
+      try {
+        html = await page.content();
+      } catch (_) {
+        html = "";
+      }
+      lastText = text;
+      lastResult = evaluateFinancialText(text, html);
+      onExpectedPage = isOnExpectedScoutPage(page.url(), code);
+
+      if (lastResult.hasAuthError) break;
+      if (lastResult.ok && onExpectedPage) break;
+
+      await sleep(1500);
+    }
+
+    const ok = lastResult.ok && onExpectedPage;
+    if (!ok) {
+      writeRunLog(logPath, `login readiness check failed code=${code} currentUrl=${page.url()} onExpectedPage=${onExpectedPage} authMarker=${JSON.stringify(lastResult.authMarker)} hasFiscalPeriod=${lastResult.hasFiscalPeriod} metrics=${lastResult.foundMetricLabels.join("|")} financialRows=${lastResult.financialRowCount}`);
+      await writeAuthDiagnostics(page, code, logPath, userDataDir, lastText);
+    } else {
+      writeRunLog(logPath, `login readiness check ok code=${code} currentUrl=${page.url()}`);
+    }
+    return ok;
+  } finally {
+    await closePageQuietly(page);
+  }
+}
+
+// PowerShell側(fetch_target_financials.ps1のInvoke-BatchFetch)がこのプロセスの
+// stdoutを共有コンソールに直接流しつつ、シグナルファイルでEnter確認を伝える。
+// process.stdinをこのnodeプロセス側で読む方式は subprocess チェーンで機能しないため使用しない。
+async function waitForReloginConfirmation(context, code, logPath, userDataDir) {
+  const resolvedDir = path.resolve(userDataDir);
+  const needSignalPath = path.join(resolvedDir, ".relogin_needed_signal");
+  const confirmSignalPath = path.join(resolvedDir, ".relogin_confirm_signal");
+  const abortSignalPath = path.join(resolvedDir, ".relogin_abort_signal");
+
+  try { fs.unlinkSync(confirmSignalPath); } catch (_) {}
+  try { fs.unlinkSync(abortSignalPath); } catch (_) {}
+  fs.writeFileSync(needSignalPath, String(Date.now()), "utf8");
+
+  writeRunLog(logPath, `ユーザーログイン待機中（Enter確認待ちモード）code=${code}`);
+
+  const loginPage = await context.newPage();
+  try {
+    await loginPage.goto("https://www.monex.co.jp/", { waitUntil: "domcontentloaded", timeout: 45000 });
+  } catch (error) {
+    writeRunLog(logPath, `relogin login page open failed code=${code} error=${error.message}`);
+  }
+
+  const reloginTimeoutMs = 5 * 60 * 1000;
+  const deadline = Date.now() + reloginTimeoutMs;
+  let lastStatusLogAt = Date.now();
+  let confirmed = false;
+
+  while (Date.now() < deadline) {
+    if (fs.existsSync(abortSignalPath)) {
+      writeRunLog(logPath, `login readiness wait aborted code=${code} reason=timeout reported by PowerShell side`);
+      break;
+    }
+    if (fs.existsSync(confirmSignalPath)) {
+      confirmed = true;
+      break;
+    }
+    const now = Date.now();
+    if (now - lastStatusLogAt >= 30000) {
+      writeRunLog(logPath, `login readiness waiting-for-enter code=${code} remaining=${Math.round((deadline - now) / 1000)}s`);
+      lastStatusLogAt = now;
+    }
+    await sleep(1000);
+  }
+
+  try { fs.unlinkSync(needSignalPath); } catch (_) {}
+  try { fs.unlinkSync(confirmSignalPath); } catch (_) {}
+  try { fs.unlinkSync(abortSignalPath); } catch (_) {}
+  await closePageQuietly(loginPage);
+
+  return confirmed;
+}
+
+// 取得に使うcontextそのものでログイン準備を確認・確保する。
+// 既に有効ならすぐtrueを返す（通常の100%成功時はここで人間の操作なしに進む）。
+// 無効な場合のみEnter確認待ちを行い、確認後に同じcontextで再確認する。
+async function ensureLoginReady(context, code, logPath, userDataDir) {
+  if (await checkLoginReady(context, code, logPath, userDataDir)) {
+    return true;
+  }
+
+  const confirmed = await waitForReloginConfirmation(context, code, logPath, userDataDir);
+  if (!confirmed) {
+    writeRunLog(logPath, `relogin_timeout code=${code} (waiting for user Enter confirmation)`);
+    return false;
+  }
+
+  writeRunLog(logPath, `login profile check user confirmed code=${code}; verifying with fetch context`);
+  const ok = await checkLoginReady(context, code, logPath, userDataDir);
+  if (!ok) {
+    printRed("Enter後の再チェックは通りましたが、取得用ブラウザで銘柄ページを開くと認証が失われました。");
+    printRed("マネックス本体メニューから銘柄スカウターを開いた画面と、取得用ブラウザの認証状態が一致していません。");
+    printRed("スクリプト側のcontext引き継ぎを確認してください。");
+  }
+  return ok;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const codes = (args.codes || "")
@@ -416,10 +564,27 @@ async function main() {
 
   const results = [];
   try {
+    const loginReady = await ensureLoginReady(context, codes[0], logPath, userDataDir);
+    if (!loginReady) {
+      writeRunLog(logPath, "batch fetch aborted: login not ready before start");
+      process.exitCode = 3;
+      return;
+    }
+
     for (let i = 0; i < codes.length; i += 1) {
       const code = codes[i];
       console.log(`[${i + 1}/${codes.length}] fetch ${code}`);
-      const result = await fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs, userDataDir);
+      let result = await fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs, userDataDir);
+
+      if (result.error_type === "auth_error") {
+        writeRunLog(logPath, `batch fetch detected auth_error mid-run code=${code}; attempting in-context relogin recovery`);
+        const recovered = await ensureLoginReady(context, code, logPath, userDataDir);
+        if (recovered) {
+          writeRunLog(logPath, `batch fetch relogin recovered code=${code}; retrying fetch`);
+          result = await fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs, userDataDir);
+        }
+      }
+
       results.push(result);
       writeCsv(resultsPath, results);
       if (result.error_type === "auth_error") {

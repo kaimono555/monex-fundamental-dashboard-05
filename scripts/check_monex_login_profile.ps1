@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BCode = "7186",
     [string]$LoginUrl = "https://www.monex.co.jp/",
     [string]$TargetUrl = "",
@@ -89,8 +89,97 @@ try {
     Write-RunLog "login profile check launch start bcode=$BCode loginUrl=$LoginUrl targetUrl=$TargetUrl userDataDir=$UserDataDir resetProfile=$ResetProfile waitForEnterAndClose=$WaitForEnterAndClose"
 
     if ($WaitForEnterAndClose) {
-        & node @nodeArgs
-        exit $LASTEXITCODE
+        # monex.ifis.co.jp の直リンクはマネックス本体メニュー経由の正規遷移を経ないと
+        # 認証が渡らないため、node側では対象URLを開かずChromeを開いたまま待機する。
+        # ここでは人間が「マネックス本体ログイン→本体メニューから銘柄スカウターを開く」
+        # 操作を終えたことをこのPowerShell画面のEnterで確認し、シグナルファイルで
+        # node側へ伝えてから対象URLの再チェックを行わせる。
+        # （process.stdin を node 側で読む方式は subprocess チェーンで機能しないため使用しない）
+        $confirmSignalPath = Join-Path $resolvedUserDataDir ".relogin_confirm_signal"
+        $abortSignalPath   = Join-Path $resolvedUserDataDir ".relogin_abort_signal"
+        Remove-Item -LiteralPath $confirmSignalPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $abortSignalPath -Force -ErrorAction SilentlyContinue
+
+        $waitArgumentList = ($nodeArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "
+        $waitProcess = Start-Process -FilePath "node" -ArgumentList $waitArgumentList -NoNewWindow -PassThru
+
+        Write-Host ""
+        Write-Host "=========================================" -ForegroundColor Yellow
+        Write-Host "マネックスログインが必要です。" -ForegroundColor Yellow
+        Write-Host "マネックスにログインしただけでは不十分です。" -ForegroundColor Yellow
+        Write-Host "必ずマネックス本体メニューから銘柄スカウターを開き、" -ForegroundColor Yellow
+        Write-Host "$BCode などの銘柄スカウター財務ページが正常に表示されていることを確認してから" -ForegroundColor Yellow
+        Write-Host "Enterを押してください。" -ForegroundColor Yellow
+        Write-Host "=========================================" -ForegroundColor Yellow
+
+        $waitTimeoutMs = 5 * 60 * 1000
+        $deadline = (Get-Date).AddMilliseconds($waitTimeoutMs)
+        $lastStatusAt = Get-Date
+        $confirmed = $false
+
+        while ((Get-Date) -lt $deadline) {
+            if ($waitProcess.HasExited) {
+                Write-RunLog "login profile check wait process exited unexpectedly before user confirmation pid=$($waitProcess.Id)"
+                break
+            }
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                if ($key.Key -eq "Enter") {
+                    $confirmed = $true
+                    break
+                }
+            }
+            if (((Get-Date) - $lastStatusAt).TotalSeconds -ge 30) {
+                $remaining = [int](($deadline - (Get-Date)).TotalSeconds)
+                Write-Host "  ...待機中（残り約 $remaining 秒）。ログイン・銘柄スカウター表示後にEnterを押してください。" -ForegroundColor Gray
+                Write-RunLog "login profile check waiting-for-enter (powershell side) remaining=${remaining}s"
+                $lastStatusAt = Get-Date
+            }
+            Start-Sleep -Milliseconds 200
+        }
+
+        if (-not $confirmed) {
+            Write-RunLog "login profile check timeout waiting for user Enter confirmation"
+            New-Item -ItemType File -Path $abortSignalPath -Force | Out-Null
+            Write-Host ""
+            Write-Host "=========================================" -ForegroundColor Red
+            Write-Host "5分以内にEnterが押されなかったため、再ログイン確認はタイムアウトしました。" -ForegroundColor Red
+            Write-Host "次の手順を確認してください：" -ForegroundColor Red
+            Write-Host "  1. 開いたChromeでマネックス証券にログインできているか確認する" -ForegroundColor Red
+            Write-Host "  2. マネックス本体のメニューから銘柄スカウターが正常に表示されるか確認する" -ForegroundColor Red
+            Write-Host "  3. 表示できる状態になったら run_05_update.bat を再実行する" -ForegroundColor Red
+            Write-Host "=========================================" -ForegroundColor Red
+            if (-not $waitProcess.HasExited) {
+                try { $waitProcess.WaitForExit(10000) } catch {}
+            }
+            exit 3
+        }
+
+        Write-Host ""
+        Write-Host "ログイン状態を再チェックしています..." -ForegroundColor Cyan
+        New-Item -ItemType File -Path $confirmSignalPath -Force | Out-Null
+
+        $checkTimeoutMs = 30000
+        if (-not $waitProcess.WaitForExit($checkTimeoutMs)) {
+            Write-RunLog "login profile check did not exit after confirmation within ${checkTimeoutMs}ms"
+            try { $waitProcess.Kill() } catch {}
+            Write-Host ""
+            Write-Host "再チェックが${checkTimeoutMs}ms以内に完了しませんでした。" -ForegroundColor Red
+            exit 3
+        }
+
+        if ($waitProcess.ExitCode -ne 0) {
+            Write-Host ""
+            Write-Host "=========================================" -ForegroundColor Red
+            Write-Host "マネックス銘柄スカウターの認証が有効ではありません。" -ForegroundColor Red
+            Write-Host "Chromeでマネックス本体にログイン後、必ず本体メニューから銘柄スカウターを開き、" -ForegroundColor Red
+            Write-Host "銘柄スカウターの画面が正常表示された状態でEnterを押してください。" -ForegroundColor Red
+            Write-Host "=========================================" -ForegroundColor Red
+        } else {
+            Write-Host "ログイン確認OK。取得を再開します。" -ForegroundColor Green
+        }
+
+        exit $waitProcess.ExitCode
     }
 
     $argumentList = ($nodeArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "

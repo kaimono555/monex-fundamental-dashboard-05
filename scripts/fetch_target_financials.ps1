@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$TargetPath = "data/target_codes.csv",
     [string]$UserDataDir = "data/playwright-profile/monex-login-profile",
     [string]$ChromeExecutablePath = "",
@@ -63,6 +63,12 @@ function Get-LatestPeriod([string]$CsvPath) {
     return Get-Field $rows[-1] 0
 }
 
+function ConvertTo-ProcessArgument {
+    param([string]$Value)
+    if ($null -eq $Value) { return '""' }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
 function Invoke-BatchFetch {
     param(
         [string[]]$Codes,
@@ -73,6 +79,21 @@ function Invoke-BatchFetch {
     if (Test-Path -LiteralPath $FetchResultsPath) {
         Remove-Item -LiteralPath $FetchResultsPath -Force
     }
+
+    # ログイン確認と60銘柄取得は、同一nodeプロセス・同一persistent context内で
+    # 行わせる（playwright_batch_fetch_financials.js側のensureLoginReady）。
+    # 別contextで再ログイン確認してからこのcontextへ引き継ぐ方式は、ブラウザの
+    # 完全な再起動（close→再launch）を挟むとIFIS側の認証が失われるため使用しない。
+    # Enter確認のUIはこのPowerShellプロセス側で行う必要があるため
+    # （process.stdinをnode側で読む方式はsubprocessチェーンで機能しない）、
+    # nodeはStart-Processで非同期起動し、シグナルファイルでやり取りする。
+    $resolvedUserDataDir = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $UserDataDir))
+    $needSignalPath    = Join-Path $resolvedUserDataDir ".relogin_needed_signal"
+    $confirmSignalPath = Join-Path $resolvedUserDataDir ".relogin_confirm_signal"
+    $abortSignalPath   = Join-Path $resolvedUserDataDir ".relogin_abort_signal"
+    Remove-Item -LiteralPath $needSignalPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $confirmSignalPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $abortSignalPath -Force -ErrorAction SilentlyContinue
 
     $nodeArgs = @(
         $NodeScript,
@@ -86,10 +107,69 @@ function Invoke-BatchFetch {
         "--retry-delay-ms", ([string]$RetryDelayMs),
         "--request-delay-ms", ([string]$RequestDelayMs)
     )
+    $argumentList = ($nodeArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "
+    $process = Start-Process -FilePath "node" -ArgumentList $argumentList -NoNewWindow -PassThru
 
-    & node @nodeArgs | ForEach-Object { Write-Host $_ }
-    $exitCode = $LASTEXITCODE
-    return [int]$exitCode
+    $reloginPromptShown = $false
+    while (-not $process.HasExited) {
+        if (-not $reloginPromptShown -and (Test-Path -LiteralPath $needSignalPath)) {
+            $reloginPromptShown = $true
+            Write-Host ""
+            Write-Host "=========================================" -ForegroundColor Yellow
+            Write-Host "マネックスログインが必要です。" -ForegroundColor Yellow
+            Write-Host "マネックスにログインしただけでは不十分です。" -ForegroundColor Yellow
+            Write-Host "必ずマネックス本体メニューから銘柄スカウターを開き、" -ForegroundColor Yellow
+            Write-Host "$($Codes[0]) などの銘柄スカウター財務ページが正常に表示されていることを確認してから" -ForegroundColor Yellow
+            Write-Host "Enterを押してください。" -ForegroundColor Yellow
+            Write-Host "=========================================" -ForegroundColor Yellow
+
+            $waitTimeoutMs = 5 * 60 * 1000
+            $deadline = (Get-Date).AddMilliseconds($waitTimeoutMs)
+            $lastStatusAt = Get-Date
+            $confirmed = $false
+
+            while ((Get-Date) -lt $deadline) {
+                if ($process.HasExited) { break }
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    if ($key.Key -eq "Enter") { $confirmed = $true; break }
+                }
+                if (((Get-Date) - $lastStatusAt).TotalSeconds -ge 30) {
+                    $remaining = [int](($deadline - (Get-Date)).TotalSeconds)
+                    Write-Host "  ...待機中（残り約 $remaining 秒）。ログイン・銘柄スカウター表示後にEnterを押してください。" -ForegroundColor Gray
+                    Write-RunLog "batch fetch waiting-for-enter (powershell side) remaining=${remaining}s"
+                    $lastStatusAt = Get-Date
+                }
+                Start-Sleep -Milliseconds 200
+            }
+
+            if (-not $process.HasExited) {
+                if (-not $confirmed) {
+                    Write-RunLog "batch fetch timeout waiting for user Enter confirmation"
+                    New-Item -ItemType File -Path $abortSignalPath -Force | Out-Null
+                    Write-Host ""
+                    Write-Host "=========================================" -ForegroundColor Red
+                    Write-Host "5分以内にEnterが押されなかったため、再ログイン確認はタイムアウトしました。" -ForegroundColor Red
+                    Write-Host "次の手順を確認してください：" -ForegroundColor Red
+                    Write-Host "  1. 開いたChromeでマネックス証券にログインできているか確認する" -ForegroundColor Red
+                    Write-Host "  2. マネックス本体のメニューから銘柄スカウターが正常に表示されるか確認する" -ForegroundColor Red
+                    Write-Host "  3. 表示できる状態になったら run_05_update.bat を再実行する" -ForegroundColor Red
+                    Write-Host "=========================================" -ForegroundColor Red
+                } else {
+                    Write-Host ""
+                    Write-Host "ログイン状態を再チェックしています..." -ForegroundColor Cyan
+                    New-Item -ItemType File -Path $confirmSignalPath -Force | Out-Null
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 300
+    }
+
+    Remove-Item -LiteralPath $needSignalPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $confirmSignalPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $abortSignalPath -Force -ErrorAction SilentlyContinue
+
+    return [int]$process.ExitCode
 }
 
 function Get-FetchResults {
@@ -97,33 +177,6 @@ function Get-FetchResults {
         return @(Import-Csv -LiteralPath $FetchResultsPath -Encoding UTF8)
     }
     return @()
-}
-
-function Test-AuthFetchStop {
-    param(
-        [object[]]$FetchResults,
-        [int]$CodeCount,
-        [int]$ExitCode
-    )
-
-    if ($ExitCode -eq 0) { return $false }
-    $authErrorRows = @($FetchResults | Where-Object { [string]$_.error_type -eq "auth_error" })
-    return ($authErrorRows.Count -gt 0 -and $FetchResults.Count -lt $CodeCount)
-}
-
-function Invoke-UserRelogin {
-    param([string]$BCode)
-
-    Write-RunLog "認証エラーページ検出→ユーザーへ再ログイン依頼"
-    $reloginOut = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_monex_login_profile.ps1") `
-        -BCode $BCode `
-        -UserDataDir $UserDataDir `
-        -ChromeExecutablePath $chromePath `
-        -LogPath $LogPath `
-        -WaitForEnterAndClose
-    $reloginExitCode = $LASTEXITCODE
-    $reloginOut | Out-Host
-    return [int]$reloginExitCode
 }
 
 Ensure-Directory $RawDir
@@ -159,43 +212,16 @@ Write-RunLog "target fetch start count=$($codes.Count)"
 
 $nodeScript = Join-Path $PSScriptRoot "playwright_batch_fetch_financials.js"
 
-Write-RunLog "login pre-check start"
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_monex_login_profile.ps1") `
-    -BCode ([string]$codes[0]) `
-    -UserDataDir $UserDataDir `
-    -ChromeExecutablePath $chromePath `
-    -LogPath $LogPath `
-    -WaitForEnterAndClose
-$loginPreCheckCode = $LASTEXITCODE
-if ($loginPreCheckCode -ne 0) {
-    Write-RunLog "login pre-check failed exit=$loginPreCheckCode; aborting fetch"
-    throw "login pre-check failed (exit=$loginPreCheckCode); fetch aborted"
-}
-Write-RunLog "login pre-check success"
-
+# ログイン確認(必要な場合のEnter確認待ちを含む)と60銘柄取得は、Invoke-BatchFetch が
+# 起動する単一のnodeプロセス・単一のpersistent context内で行う
+# （playwright_batch_fetch_financials.js の ensureLoginReady）。
+# ログインが既に有効な場合は人間の操作なしにそのまま取得が始まる。
 $nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
 $fetchResults = @(Get-FetchResults)
 
-while (Test-AuthFetchStop -FetchResults $fetchResults -CodeCount $codes.Count -ExitCode $nodeExitCode) {
-    $firstAuthCode = [string](@($fetchResults | Where-Object { [string]$_.error_type -eq "auth_error" } | Select-Object -First 1).code)
-    if ([string]::IsNullOrWhiteSpace($firstAuthCode)) { $firstAuthCode = [string]$codes[0] }
-
-    $loginExitCode = Invoke-UserRelogin -BCode $firstAuthCode
-    if ($loginExitCode -ne 0) {
-        Write-RunLog "user relogin check failed exitCode=$loginExitCode; requesting login again"
-        $nodeExitCode = $loginExitCode
-        $fetchResults = @(Get-FetchResults)
-        continue
-    }
-
-    Write-RunLog "target fetch restart from first code after user relogin"
-    $nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
-    $fetchResults = @(Get-FetchResults)
-}
-
 if ($nodeExitCode -ne 0 -and $fetchResults.Count -eq 0) {
     Write-RunLog "target fetch fatal no fetch result rows exitCode=$nodeExitCode; aborting before fallback"
-    throw "fetch did not produce result rows. Close any Chrome window using $UserDataDir, then rerun."
+    throw "fetch did not produce result rows (exitCode=$nodeExitCode). ログイン確認に失敗したか、Chromeウィンドウが$UserDataDirを使用中の可能性があります。"
 }
 
 if ($nodeExitCode -ne 0) {
