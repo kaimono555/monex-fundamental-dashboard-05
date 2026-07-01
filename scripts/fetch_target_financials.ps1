@@ -127,10 +127,21 @@ function Invoke-BatchFetch {
         Remove-Item -LiteralPath $FetchResultsPath -Force
     }
 
-    # 本スクリプトは自動実行モード専用。人間の入力（Enter確認）は一切待たない。
-    # ログインが切れている場合はplaywright_batch_fetch_financials.js側が即座に
-    # exitCode=3を返して終了する（待機なし）。マネックスへの手動ログイン更新は
-    # scripts\login_monex_profile_05.ps1（専用スクリプト）でのみ行う設計とする。
+    # [Console]::IsInputRedirected で無人実行(true=リダイレクト)/手動実行(false)を判定する。
+    # 無人実行（タスクスケジューラ等でstdinがリダイレクトされている）場合、ログインが
+    # 切れていてもEnter入力を受け取る手段がないため、待たずに即exitCode=3で終了する
+    # （2026-06-30に修正した「無人実行時にEnter待ちで固まる問題」の再発防止）。
+    # 手動実行（run_05_update.batを人間が直接ダブルクリック等で実行）の場合のみ、
+    # playwright_batch_fetch_financials.js側でChromeを開いてEnter入力を待つ。
+    $isInteractive = $false
+    try {
+        $isInteractive = -not [Console]::IsInputRedirected
+    } catch {
+        $isInteractive = $false
+    }
+    $interactiveFlag = if ($isInteractive) { "true" } else { "false" }
+    Write-Host "  実行モード判定: IsInputRedirected判定によりinteractive=$interactiveFlag" -ForegroundColor Gray
+
     $resolvedUserDataDir = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $UserDataDir))
 
     # 05専用プロファイルを起動前に解放しておく（前回異常終了の残存プロセス対策）。
@@ -149,7 +160,8 @@ function Invoke-BatchFetch {
         "--results-path", $FetchResultsPath,
         "--max-retries", ([string]$MaxRetries),
         "--retry-delay-ms", ([string]$RetryDelayMs),
-        "--request-delay-ms", ([string]$RequestDelayMs)
+        "--request-delay-ms", ([string]$RequestDelayMs),
+        "--allow-interactive-login", $interactiveFlag
     )
 
     # 自動実行モードでは人間入力を待たないため、Start-Process(非同期起動+ポーリング)
@@ -214,22 +226,29 @@ $nodeScript = Join-Path $PSScriptRoot "playwright_batch_fetch_financials.js"
 
 # ログイン確認と60銘柄取得は、Invoke-BatchFetch が起動する単一のnodeプロセス・
 # 単一のpersistent context内で行う（playwright_batch_fetch_financials.js の
-# ensureLoginReady）。本スクリプトは自動実行モード専用のため、ログインが切れて
-# いる場合は人間の入力を待たずに即座に失敗する（exitCode=3）。
-# ログインが既に有効な場合は人間の操作なしにそのまま取得が始まる。
+# ensureLoginReady）。ログインが切れている場合、手動実行時（interactive=true）は
+# Chromeを開いてEnter入力を待ち、無人実行時（interactive=false）は待たずに
+# 即座に失敗する（exitCode=3）。ログインが既に有効な場合はどちらのモードでも
+# 人間の操作なしにそのまま取得が始まる。
 $nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
 $fetchResults = @(Get-FetchResults)
 
 if ($nodeExitCode -eq 3) {
-    Write-RunLog "target fetch aborted: login not ready (automated mode, no human wait)"
+    Write-RunLog "target fetch aborted: login not ready (interactive=$interactiveFlag)"
     Write-Host ""
     Write-Host "=========================================" -ForegroundColor Red
     Write-Host "05専用マネックスプロファイルが未ログイン、またはログイン切れです。" -ForegroundColor Red
-    Write-Host "自動実行モードのため、この画面ではログイン待ちは行いません。" -ForegroundColor Red
-    Write-Host "先に scripts\login_monex_profile_05.ps1 を手動実行して、マネックスへログイン状態を保存してください。" -ForegroundColor Red
-    Write-Host "その後、親バッチ run_all_04_05_04_06.bat を再実行してください。" -ForegroundColor Red
-    Write-Host "=========================================" -ForegroundColor Red
-    throw "05専用マネックスプロファイルが未ログインのため停止しました。scripts\login_monex_profile_05.ps1 を実行してください。"
+    if ($isInteractive) {
+        Write-Host "手動実行モードのためログイン待ちを行いましたが、ログイン状態を確認できませんでした。" -ForegroundColor Red
+        Write-Host "マネックス本体にログインし、銘柄スカウターの財務ページが表示される状態にしてから、再度 run_05_update.bat を実行してください。" -ForegroundColor Red
+        Write-Host "=========================================" -ForegroundColor Red
+        throw "05専用マネックスプロファイルのログイン待ちがタイムアウト、または確認に失敗したため停止しました。"
+    } else {
+        Write-Host "無人実行モードのため、この画面ではログイン待ちは行いません。" -ForegroundColor Red
+        Write-Host "先に scripts\login_monex_profile_05.ps1 を手動実行するか、run_05_update.bat をダブルクリックで再実行してください。" -ForegroundColor Red
+        Write-Host "=========================================" -ForegroundColor Red
+        throw "05専用マネックスプロファイルが未ログインのため停止しました。scripts\login_monex_profile_05.ps1 を実行するか、run_05_update.bat を再実行してください。"
+    }
 }
 
 if ($nodeExitCode -ne 0 -and $fetchResults.Count -eq 0) {

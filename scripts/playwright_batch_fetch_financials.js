@@ -1,5 +1,6 @@
 ﻿const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 const { detectAuthErrorPage } = require("./auth_detect");
 
 function parseArgs(argv) {
@@ -356,6 +357,41 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
   };
 }
 
+// 手動実行モード（[Console]::IsInputRedirected が false）でのみ呼び出される。
+// stdinが実コンソールに接続されている場合のみEnter入力が意味を持つため、
+// 無人実行モード（stdinリダイレクト）ではこの関数自体を呼び出さない設計とする。
+function waitForEnterWithCountdown(promptLines, timeoutMs, logPath) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    let finished = false;
+    const deadline = Date.now() + timeoutMs;
+
+    const finish = (confirmed) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(statusTimer);
+      clearTimeout(timeoutTimer);
+      rl.close();
+      resolve(confirmed);
+    };
+
+    promptLines.forEach((line) => console.log(line));
+
+    rl.question("", () => finish(true));
+
+    const statusTimer = setInterval(() => {
+      const remaining = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      console.log(`ログイン完了待機中... 残り ${remaining} 秒`);
+      writeRunLog(logPath, `interactive login wait remaining=${remaining}s`);
+    }, 30000);
+
+    const timeoutTimer = setTimeout(() => {
+      console.log("タイムアウトしました。Enterキーが押されませんでした。");
+      finish(false);
+    }, timeoutMs);
+  });
+}
+
 async function waitForChromeProfileRelease(resolvedProfilePath, logPath) {
   const lockPath = path.join(resolvedProfilePath, "lockfile");
   const timeoutMs = 30000;
@@ -444,9 +480,8 @@ async function checkLoginReady(context, code, logPath, userDataDir) {
   }
 }
 
-// 本スクリプトは自動実行モード専用であり、人間の入力（Enter確認）は一切待たない。
-// ログインが有効ならすぐtrueを返し、無効な場合は即座にfalseを返して終了する。
-// マネックスへの手動ログイン更新は scripts/login_monex_profile_05.ps1（専用スクリプト）でのみ行う。
+// ログインが有効ならすぐtrueを返す。無効な場合、呼び出し元はallowInteractiveLoginが
+// trueのときのみEnter待ちに入り、falseのとき（無人実行）はそのままfalseを返して終了する。
 async function ensureLoginReady(context, code, logPath, userDataDir) {
   const ok = await checkLoginReady(context, code, logPath, userDataDir);
   if (!ok) {
@@ -469,6 +504,10 @@ async function main() {
   const maxRetries = Math.max(1, Number.parseInt(args["max-retries"] || "3", 10));
   const retryDelayMs = Math.max(0, Number.parseInt(args["retry-delay-ms"] || "5000", 10));
   const requestDelayMs = Math.max(0, Number.parseInt(args["request-delay-ms"] || "1500", 10));
+  // 呼び出し元のfetch_target_financials.ps1が[Console]::IsInputRedirectedで判定した結果を
+  // 引き継ぐ。無人実行（stdinリダイレクト）では必ず"false"が渡され、待機は行わない。
+  const allowInteractiveLogin = (args["allow-interactive-login"] || "false").toLowerCase() === "true";
+  const interactiveLoginTimeoutMs = 300000;
   const resolvedUserDataDir = path.resolve(userDataDir);
 
   ensureDirectory(userDataDir);
@@ -499,7 +538,29 @@ async function main() {
 
   const results = [];
   try {
-    const loginReady = await ensureLoginReady(context, codes[0], logPath, userDataDir);
+    let loginReady = await ensureLoginReady(context, codes[0], logPath, userDataDir);
+    if (!loginReady && allowInteractiveLogin) {
+      writeRunLog(logPath, "login not ready; interactive mode (manual run) enabled, opening login page and waiting for Enter");
+      const loginPage = context.pages()[0] || (await context.newPage());
+      await loginPage.goto("https://www.monex.co.jp/", { waitUntil: "domcontentloaded", timeout: 45000 });
+      const confirmed = await waitForEnterWithCountdown(
+        [
+          "",
+          "=========================================",
+          "05専用マネックスプロファイルが未ログイン、またはログイン切れです。",
+          "右側のブラウザでマネックスにログインしてください。",
+          "ログイン完了後、このコンソール画面で Enter を押してください。",
+          "========================================="
+        ],
+        interactiveLoginTimeoutMs,
+        logPath
+      );
+      if (confirmed) {
+        loginReady = await ensureLoginReady(context, codes[0], logPath, userDataDir);
+      } else {
+        writeRunLog(logPath, "interactive login wait timed out, no Enter pressed");
+      }
+    }
     if (!loginReady) {
       writeRunLog(logPath, "batch fetch aborted: login not ready before start");
       process.exitCode = 3;
