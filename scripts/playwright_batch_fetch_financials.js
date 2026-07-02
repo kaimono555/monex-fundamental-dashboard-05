@@ -398,8 +398,8 @@ async function waitForInteractiveLogin(context, code, logPath, timeoutMs) {
         html = "";
       }
 
-      const result = evaluateFinancialText(text, html);
-      if (result.ok) {
+      const { ready } = isFinancialScoutPageReady(text, html);
+      if (ready) {
         writeRunLog(logPath, `interactive login detected success code=${code} currentUrl=${page.url()}`);
         success = true;
         break;
@@ -454,9 +454,40 @@ async function waitForChromeProfileRelease(resolvedProfilePath, logPath) {
 }
 
 function isOnExpectedScoutPage(currentUrl, code) {
-  return currentUrl.includes("monex.ifis.co.jp")
-    && currentUrl.includes("sa=report_zaimu")
-    && currentUrl.includes(`bcode=${code}`);
+  let parsed;
+  try {
+    parsed = new URL(currentUrl);
+  } catch (_) {
+    return false;
+  }
+  if (parsed.hostname !== "monex.ifis.co.jp") return false;
+  if (parsed.pathname !== "/index.php") return false;
+
+  const params = parsed.searchParams;
+  const sa = params.get("sa");
+  const codeStr = String(code);
+
+  // 財務ページ（表内タブ）
+  if (sa === "report_zaimu" && params.get("bcode") === codeStr) return true;
+  // 銘柄スカウター検索結果ページ（ログイン直後にここへ着地するケースがある）
+  if (sa === "find" && params.get("ta") === "n" && params.get("wd") === codeStr) return true;
+
+  return false;
+}
+
+// ログイン済み・銘柄スカウター表示済みの判定専用の追加キーワード。
+// evaluateFinancialText の ok 判定（財務テーブル行の存在）はfetchOneの取得成功判定に
+// そのまま使うため変更しない。sa=find検索結果ページ等、テーブル行が揃う前でも
+// 「ログインは完了し銘柄スカウターが表示されている」と分かる状態を拾うための緩い判定。
+const SCOUT_PAGE_READY_MARKERS = [
+  "PER", "PBR", "ROE", "ROA", "予想経常利益", "財務データ", "財務データ等更新日", "業績", "経常利益"
+];
+
+function isFinancialScoutPageReady(text, html = "") {
+  const result = evaluateFinancialText(text, html);
+  if (result.hasAuthError) return { ready: false, result };
+  const ready = result.ok || SCOUT_PAGE_READY_MARKERS.some((marker) => text.includes(marker));
+  return { ready, result };
 }
 
 // ログイン状態の確認は、実際に取得に使う context で直接該当銘柄ページを開いて行う。
@@ -473,6 +504,7 @@ async function checkLoginReady(context, code, logPath, userDataDir) {
     const deadlineMs = Date.now() + 15000;
     let lastText = "";
     let lastResult = evaluateFinancialText("");
+    let lastReady = false;
     let onExpectedPage = isOnExpectedScoutPage(page.url(), code);
 
     while (Date.now() < deadlineMs) {
@@ -494,16 +526,18 @@ async function checkLoginReady(context, code, logPath, userDataDir) {
         html = "";
       }
       lastText = text;
-      lastResult = evaluateFinancialText(text, html);
+      const scoutPageReady = isFinancialScoutPageReady(text, html);
+      lastResult = scoutPageReady.result;
+      lastReady = scoutPageReady.ready;
       onExpectedPage = isOnExpectedScoutPage(page.url(), code);
 
       if (lastResult.hasAuthError) break;
-      if (lastResult.ok && onExpectedPage) break;
+      if (lastReady && onExpectedPage) break;
 
       await sleep(1500);
     }
 
-    const ok = lastResult.ok && onExpectedPage;
+    const ok = lastReady && onExpectedPage;
     if (!ok) {
       writeRunLog(logPath, `login readiness check failed code=${code} currentUrl=${page.url()} onExpectedPage=${onExpectedPage} authMarker=${JSON.stringify(lastResult.authMarker)} hasFiscalPeriod=${lastResult.hasFiscalPeriod} metrics=${lastResult.foundMetricLabels.join("|")} financialRows=${lastResult.financialRowCount}`);
       await writeAuthDiagnostics(page, code, logPath, userDataDir, lastText);
