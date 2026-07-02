@@ -360,52 +360,58 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
 // process.stdin / readline によるEnter入力待ちは、update_all_05.ps1 → run_project.ps1 →
 // fetch_target_financials.ps1 → node という多段subprocessではEnterがnodeに届かず、
 // タイムアウトまで無駄に待ってしまうため使用しない（2026-07判明・修正）。
-// 代わりに、対象の銘柄スカウター財務ページをタブで開いたまま、ユーザーがログイン後に
-// そのタブをF5で更新するのを、財務データDOMの出現でポーリング検出する
-// （playwright_check_monex_login_profile.jsのポーリング方式と同じ考え方）。
+// 代わりに、対象の銘柄スカウター財務ページのタブを1つ開いた上で、毎回 context.pages() を
+// 全走査し、bcode一致するタブすべてを確認する（固定タブ1つだけを見ていると、人間が
+// ログイン後に別タブ・新規タブで財務ページを開いた場合や、認証エラー状態のまま残っている
+// 開始時タブをF5し忘れた場合に、成功タブを見逃してタイムアウトする問題があったため
+// 2026-07に全タブスキャン方式へ修正）。
 async function waitForInteractiveLogin(context, code, logPath, timeoutMs) {
   const targetUrl = `https://monex.ifis.co.jp/index.php?sa=report_zaimu&bcode=${code}`;
-  const targetPage = await context.newPage();
-  await targetPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+  const openedPage = await context.newPage();
+  await openedPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
 
   const deadlineMs = Date.now() + timeoutMs;
   let lastStatusLogAt = Date.now();
   let success = false;
 
   while (Date.now() < deadlineMs) {
-    try {
-      await targetPage.waitForLoadState("domcontentloaded", { timeout: 2000 });
-    } catch (_) {
-      // Continue with current DOM.
+    const candidatePages = context.pages().filter((page) => isOnExpectedScoutPage(page.url(), code));
+
+    for (const page of candidatePages) {
+      try {
+        await page.waitForLoadState("domcontentloaded", { timeout: 2000 });
+      } catch (_) {
+        // Continue with current DOM.
+      }
+
+      let text = "";
+      try {
+        text = await page.locator("body").innerText({ timeout: 2000 });
+      } catch (_) {
+        text = "";
+      }
+
+      let html = "";
+      try {
+        html = await page.content();
+      } catch (_) {
+        html = "";
+      }
+
+      const result = evaluateFinancialText(text, html);
+      if (result.ok) {
+        writeRunLog(logPath, `interactive login detected success code=${code} currentUrl=${page.url()}`);
+        success = true;
+        break;
+      }
     }
 
-    let text = "";
-    try {
-      text = await targetPage.locator("body").innerText({ timeout: 2000 });
-    } catch (_) {
-      text = "";
-    }
-
-    let html = "";
-    try {
-      html = await targetPage.content();
-    } catch (_) {
-      html = "";
-    }
-
-    const result = evaluateFinancialText(text, html);
-    const onExpectedPage = isOnExpectedScoutPage(targetPage.url(), code);
-
-    if (result.ok && onExpectedPage) {
-      writeRunLog(logPath, `interactive login detected success code=${code} currentUrl=${targetPage.url()}`);
-      success = true;
-      break;
-    }
+    if (success) break;
 
     const now = Date.now();
     if (now - lastStatusLogAt >= 30000) {
       const remainingSec = Math.round((deadlineMs - now) / 1000);
-      writeRunLog(logPath, `interactive login waiting code=${code} remaining=${remainingSec}s currentUrl=${targetPage.url()} authMarker=${JSON.stringify(result.authMarker)}`);
+      writeRunLog(logPath, `interactive login waiting code=${code} remaining=${remainingSec}s candidateTabs=${candidatePages.length} totalTabs=${context.pages().length}`);
       console.log(`ログイン完了待機中... 残り ${remainingSec} 秒`);
       lastStatusLogAt = now;
     }
@@ -414,11 +420,11 @@ async function waitForInteractiveLogin(context, code, logPath, timeoutMs) {
   }
 
   if (!success) {
-    writeRunLog(logPath, `interactive login wait timed out code=${code} timeout=${Math.round(timeoutMs / 1000)}s`);
+    writeRunLog(logPath, `interactive login wait timed out code=${code} timeout=${Math.round(timeoutMs / 1000)}s totalTabs=${context.pages().length}`);
     console.log("タイムアウトしました。ログイン完了を検出できませんでした。");
   }
 
-  await closePageQuietly(targetPage);
+  await closePageQuietly(openedPage);
   return success;
 }
 
@@ -576,8 +582,8 @@ async function main() {
       console.log("");
       console.log("=========================================");
       console.log("05専用マネックスプロファイルが未ログイン、またはログイン切れです。");
-      console.log("開いたChromeでマネックスにログイン後、銘柄スカウターの財務ページタブをF5で更新してください。");
-      console.log("Enterキーの入力は不要です。ログインを自動検出します。");
+      console.log("開いたChromeでマネックスにログイン後、銘柄スカウターの財務ページ（表示中のタブでも新しいタブでも可）が");
+      console.log("表示される状態にしてください。Enterキーの入力は不要です。ログインを自動検出します。");
       console.log("=========================================");
       loginReady = await waitForInteractiveLogin(context, codes[0], logPath, interactiveLoginTimeoutMs);
     }
