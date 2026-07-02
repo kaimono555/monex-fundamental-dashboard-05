@@ -127,19 +127,8 @@ function Invoke-BatchFetch {
         Remove-Item -LiteralPath $FetchResultsPath -Force
     }
 
-    # [Console]::IsInputRedirected で無人実行(true=リダイレクト)/手動実行(false)を判定する。
-    # 無人実行（タスクスケジューラ等でstdinがリダイレクトされている）場合、ログインが
-    # 切れていてもEnter入力を受け取る手段がないため、待たずに即exitCode=3で終了する
-    # （2026-06-30に修正した「無人実行時にEnter待ちで固まる問題」の再発防止）。
-    # 手動実行（run_05_update.batを人間が直接ダブルクリック等で実行）の場合のみ、
-    # playwright_batch_fetch_financials.js側でChromeを開いてEnter入力を待つ。
-    $isInteractive = $false
-    try {
-        $isInteractive = -not [Console]::IsInputRedirected
-    } catch {
-        $isInteractive = $false
-    }
-    $interactiveFlag = if ($isInteractive) { "true" } else { "false" }
+    # $isInteractive / $interactiveFlag はスクリプトスコープ（呼び出し元）で計算済みの値を
+    # そのまま参照する（このfunctionではWrite-Hostするのみで、再計算はしない）。
     Write-Host "  実行モード判定: IsInputRedirected判定によりinteractive=$interactiveFlag" -ForegroundColor Gray
 
     $resolvedUserDataDir = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $UserDataDir))
@@ -209,6 +198,24 @@ if ($codes.Count -eq 0) {
     throw "target file has no codes: $TargetPath"
 }
 
+# [Console]::IsInputRedirected で無人実行(true=リダイレクト)/手動実行(false)を判定する。
+# 無人実行（タスクスケジューラ等でstdinがリダイレクトされている）場合、ログインが
+# 切れていても人間がChrome側でログイン操作をする手段がないため、待たずに即exitCode=3で終了する
+# （2026-06-30に修正した「無人実行時にEnter待ちで固まる問題」の再発防止）。
+# 手動実行（run_05_update.batを人間が直接ダブルクリック等で実行）の場合のみ、
+# playwright_batch_fetch_financials.js側でChromeを開き、Enter入力ではなく
+# 財務ページDOMのポーリングでログイン完了を自動検出する
+# （多段subprocessではEnterがnodeに届かないため、2026-07にEnter待ち方式を廃止）。
+# スクリプトスコープで一度だけ計算する（Invoke-BatchFetch内で計算すると関数ローカルに
+# なり、関数の外（exitCode=3判定部分）から参照できず常に空値になるバグがあったため）。
+$isInteractive = $false
+try {
+    $isInteractive = -not [Console]::IsInputRedirected
+} catch {
+    $isInteractive = $false
+}
+$interactiveFlag = if ($isInteractive) { "true" } else { "false" }
+
 $chromePath = Get-ChromeExecutable $ChromeExecutablePath
 if ([string]::IsNullOrWhiteSpace($chromePath)) {
     throw "Chrome executable not found"
@@ -227,9 +234,9 @@ $nodeScript = Join-Path $PSScriptRoot "playwright_batch_fetch_financials.js"
 # ログイン確認と60銘柄取得は、Invoke-BatchFetch が起動する単一のnodeプロセス・
 # 単一のpersistent context内で行う（playwright_batch_fetch_financials.js の
 # ensureLoginReady）。ログインが切れている場合、手動実行時（interactive=true）は
-# Chromeを開いてEnter入力を待ち、無人実行時（interactive=false）は待たずに
-# 即座に失敗する（exitCode=3）。ログインが既に有効な場合はどちらのモードでも
-# 人間の操作なしにそのまま取得が始まる。
+# Chromeを開いてログイン完了をポーリングで自動検出し（Enter入力は不要）、
+# 無人実行時（interactive=false）は待たずに即座に失敗する（exitCode=3）。
+# ログインが既に有効な場合はどちらのモードでも人間の操作なしにそのまま取得が始まる。
 $nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
 $fetchResults = @(Get-FetchResults)
 

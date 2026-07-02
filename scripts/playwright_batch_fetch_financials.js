@@ -1,6 +1,5 @@
 ﻿const fs = require("fs");
 const path = require("path");
-const readline = require("readline");
 const { detectAuthErrorPage } = require("./auth_detect");
 
 function parseArgs(argv) {
@@ -310,7 +309,7 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
         lastErrorMessage = "authentication page detected";
         printRed("マネックス銘柄スカウターの認証が有効ではありません。");
         printRed("Chromeでマネックス本体にログイン後、必ず本体メニューから銘柄スカウターを開き、");
-        printRed("銘柄スカウターの画面が正常表示された状態でEnterを押してください。");
+        printRed("銘柄スカウターの画面が正常表示された状態にしてください。");
       } else if (!result.hasFiscalPeriod) {
         lastErrorType = "financial_markers_not_found";
         lastErrorMessage = "fiscal period not found";
@@ -358,38 +357,69 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
 }
 
 // 手動実行モード（[Console]::IsInputRedirected が false）でのみ呼び出される。
-// stdinが実コンソールに接続されている場合のみEnter入力が意味を持つため、
-// 無人実行モード（stdinリダイレクト）ではこの関数自体を呼び出さない設計とする。
-function waitForEnterWithCountdown(promptLines, timeoutMs, logPath) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    let finished = false;
-    const deadline = Date.now() + timeoutMs;
+// process.stdin / readline によるEnter入力待ちは、update_all_05.ps1 → run_project.ps1 →
+// fetch_target_financials.ps1 → node という多段subprocessではEnterがnodeに届かず、
+// タイムアウトまで無駄に待ってしまうため使用しない（2026-07判明・修正）。
+// 代わりに、対象の銘柄スカウター財務ページをタブで開いたまま、ユーザーがログイン後に
+// そのタブをF5で更新するのを、財務データDOMの出現でポーリング検出する
+// （playwright_check_monex_login_profile.jsのポーリング方式と同じ考え方）。
+async function waitForInteractiveLogin(context, code, logPath, timeoutMs) {
+  const targetUrl = `https://monex.ifis.co.jp/index.php?sa=report_zaimu&bcode=${code}`;
+  const targetPage = await context.newPage();
+  await targetPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-    const finish = (confirmed) => {
-      if (finished) return;
-      finished = true;
-      clearInterval(statusTimer);
-      clearTimeout(timeoutTimer);
-      rl.close();
-      resolve(confirmed);
-    };
+  const deadlineMs = Date.now() + timeoutMs;
+  let lastStatusLogAt = Date.now();
+  let success = false;
 
-    promptLines.forEach((line) => console.log(line));
+  while (Date.now() < deadlineMs) {
+    try {
+      await targetPage.waitForLoadState("domcontentloaded", { timeout: 2000 });
+    } catch (_) {
+      // Continue with current DOM.
+    }
 
-    rl.question("", () => finish(true));
+    let text = "";
+    try {
+      text = await targetPage.locator("body").innerText({ timeout: 2000 });
+    } catch (_) {
+      text = "";
+    }
 
-    const statusTimer = setInterval(() => {
-      const remaining = Math.max(0, Math.round((deadline - Date.now()) / 1000));
-      console.log(`ログイン完了待機中... 残り ${remaining} 秒`);
-      writeRunLog(logPath, `interactive login wait remaining=${remaining}s`);
-    }, 30000);
+    let html = "";
+    try {
+      html = await targetPage.content();
+    } catch (_) {
+      html = "";
+    }
 
-    const timeoutTimer = setTimeout(() => {
-      console.log("タイムアウトしました。Enterキーが押されませんでした。");
-      finish(false);
-    }, timeoutMs);
-  });
+    const result = evaluateFinancialText(text, html);
+    const onExpectedPage = isOnExpectedScoutPage(targetPage.url(), code);
+
+    if (result.ok && onExpectedPage) {
+      writeRunLog(logPath, `interactive login detected success code=${code} currentUrl=${targetPage.url()}`);
+      success = true;
+      break;
+    }
+
+    const now = Date.now();
+    if (now - lastStatusLogAt >= 30000) {
+      const remainingSec = Math.round((deadlineMs - now) / 1000);
+      writeRunLog(logPath, `interactive login waiting code=${code} remaining=${remainingSec}s currentUrl=${targetPage.url()} authMarker=${JSON.stringify(result.authMarker)}`);
+      console.log(`ログイン完了待機中... 残り ${remainingSec} 秒`);
+      lastStatusLogAt = now;
+    }
+
+    await sleep(2000);
+  }
+
+  if (!success) {
+    writeRunLog(logPath, `interactive login wait timed out code=${code} timeout=${Math.round(timeoutMs / 1000)}s`);
+    console.log("タイムアウトしました。ログイン完了を検出できませんでした。");
+  }
+
+  await closePageQuietly(targetPage);
+  return success;
 }
 
 async function waitForChromeProfileRelease(resolvedProfilePath, logPath) {
@@ -540,26 +570,16 @@ async function main() {
   try {
     let loginReady = await ensureLoginReady(context, codes[0], logPath, userDataDir);
     if (!loginReady && allowInteractiveLogin) {
-      writeRunLog(logPath, "login not ready; interactive mode (manual run) enabled, opening login page and waiting for Enter");
+      writeRunLog(logPath, "login not ready; interactive mode (manual run) enabled, opening login page and polling for manual login completion");
       const loginPage = context.pages()[0] || (await context.newPage());
       await loginPage.goto("https://www.monex.co.jp/", { waitUntil: "domcontentloaded", timeout: 45000 });
-      const confirmed = await waitForEnterWithCountdown(
-        [
-          "",
-          "=========================================",
-          "05専用マネックスプロファイルが未ログイン、またはログイン切れです。",
-          "右側のブラウザでマネックスにログインしてください。",
-          "ログイン完了後、このコンソール画面で Enter を押してください。",
-          "========================================="
-        ],
-        interactiveLoginTimeoutMs,
-        logPath
-      );
-      if (confirmed) {
-        loginReady = await ensureLoginReady(context, codes[0], logPath, userDataDir);
-      } else {
-        writeRunLog(logPath, "interactive login wait timed out, no Enter pressed");
-      }
+      console.log("");
+      console.log("=========================================");
+      console.log("05専用マネックスプロファイルが未ログイン、またはログイン切れです。");
+      console.log("開いたChromeでマネックスにログイン後、銘柄スカウターの財務ページタブをF5で更新してください。");
+      console.log("Enterキーの入力は不要です。ログインを自動検出します。");
+      console.log("=========================================");
+      loginReady = await waitForInteractiveLogin(context, codes[0], logPath, interactiveLoginTimeoutMs);
     }
     if (!loginReady) {
       writeRunLog(logPath, "batch fetch aborted: login not ready before start");
