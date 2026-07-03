@@ -228,8 +228,7 @@ try {
 
         $fetchFailed = ($successFetchCount -eq 0) `
             -or ($fetchSuccessRate -eq 0) `
-            -or ($null -ne $summaryReportSuccessCount -and $summaryReportSuccessCount -eq 0) `
-            -or $normalReportStale
+            -or ($null -ne $summaryReportSuccessCount -and $summaryReportSuccessCount -eq 0)
 
         if ($fetchFailed) {
             Write-Host ""
