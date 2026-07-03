@@ -121,6 +121,12 @@ function Parse-FinancialsFromText {
         $eps = if ($columns.Count -ge 10) { Normalize-FinancialValue $columns[9] } else { "" }
         $bps = if ($columns.Count -ge 11) { Normalize-FinancialValue $columns[10] } else { "" }
 
+        # 銀行・金融業は決算期によって営業利益欄が「－」（記載なし）になるため、
+        # Parse-FinancialsFromHtml と同じ規約で経常利益を代用する（行を丸ごと破棄しない）。
+        if ([string]::IsNullOrWhiteSpace($operatingProfit)) {
+            $operatingProfit = $ordinaryProfit
+        }
+
         if ([string]::IsNullOrWhiteSpace($sales) -or [string]::IsNullOrWhiteSpace($operatingProfit) -or [string]::IsNullOrWhiteSpace($ordinaryProfit) -or [string]::IsNullOrWhiteSpace($netIncome)) {
             continue
         }
