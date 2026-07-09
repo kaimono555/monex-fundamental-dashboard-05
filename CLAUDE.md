@@ -117,6 +117,10 @@
 | `batch fetch fatal error=browserType.launchPersistentContext` | Chromeプロファイルがロック中 |
 | ログが `ユーザーログイン待機中` で停止 | stdin 不通（旧フロー）— 発生しないはずだが確認要 |
 
+※ 上記「ログイン待ち60秒」は自動取得スクリプト内のポーリング判定の話。
+  手動ログインスクリプト（login_monex_profile_05.ps1）実行後にChromeを
+  閉じずに5〜6分置くのは、それとは別の運用上の待機であり矛盾しない。
+
 ---
 
 ## セキュリティ
@@ -143,6 +147,25 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check_monex_login_profile.ps1
 ```
 
 Chrome が開いたら: monex.co.jp でログイン → ifis タブを F5 → 財務データを確認 → 自動で閉じる
+
+### 手動ログイン時の運用手順（推奨・確定版 2026-07-09）
+
+login_monex_profile_05.ps1 実行後、Chromeを閉じずに5〜6分放置してから
+update_all_05.ps1 を実行すると、IFIS側認証セッションが安定し取得成功率が上がる
+ことを実地テストで確認済み（60/60成功）。
+
+1. login_monex_profile_05.ps1 を実行
+2. ブラウザ上で通常どおりログイン
+3. ログイン後、PowerShellコンソールでEnterは押さない
+4. Chromeも閉じない
+5. 5〜6分放置する
+6. Chromeを開いたまま、別PowerShellから update_all_05.ps1 を実行する
+7. 60件取得完了後、必要ならChromeを閉じてよい
+
+※ ログインID・パスワード・認証情報・Cookie/セッションの中身は、この手順・
+  自動化スクリプトのいずれにおいても取得・記録・表示しない。
+  人間がブラウザ上で通常どおりログインするのみで、自動化側は
+  成功/失敗の判定結果のみをログに残す。
 
 ### 単体実行
 
