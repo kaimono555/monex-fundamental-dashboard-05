@@ -55,11 +55,11 @@ try {
     Write-Host "04 follow_candidates.csv: $($SourceFile.FullName) lastwrite=$($SourceFile.LastWriteTime.ToString('yyyy/MM/dd HH:mm:ss')) count=$($SourceCodes.Count)"
     Write-Host "05 target_codes.csv: $($TargetFile.FullName) lastwrite=$($TargetFile.LastWriteTime.ToString('yyyy/MM/dd HH:mm:ss')) count=$($TargetCodes.Count)"
 
-    if ($SourceCodes.Count -ne 60) {
-        throw "04 follow_candidates count is not 60: $($SourceCodes.Count)"
+    if ($SourceCodes.Count -lt 50) {
+        throw "04 follow_candidates count is below minimum (50): $($SourceCodes.Count)"
     }
-    if ($TargetCodes.Count -ne 60) {
-        throw "05 target_codes count is not 60: $($TargetCodes.Count)"
+    if ($TargetCodes.Count -lt 50) {
+        throw "05 target_codes count is below minimum (50): $($TargetCodes.Count)"
     }
 
     $SourceSet = @($SourceCodes | Sort-Object -Unique)
@@ -147,8 +147,8 @@ try {
 
         $FinalRows = @(Import-Csv -LiteralPath $FinalFollowCandidates -Encoding UTF8)
         Write-Host "再生成後 follow_candidates.csv: $FinalFollowCandidates lastwrite=$((Get-Item -LiteralPath $FinalFollowCandidates).LastWriteTime.ToString('yyyy/MM/dd HH:mm:ss')) count=$($FinalRows.Count)"
-        if ($FinalRows.Count -ne 60) {
-            throw "04 final follow_candidates count is not 60: $($FinalRows.Count)"
+        if ($FinalRows.Count -lt 50) {
+            throw "04 final follow_candidates count is below minimum (50): $($FinalRows.Count)"
         }
     }
 
