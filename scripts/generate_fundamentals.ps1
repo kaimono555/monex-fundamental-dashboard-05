@@ -34,7 +34,9 @@ function Normalize-Number([string]$Value) {
 
 function Format-Number([object]$Value, [int]$Decimals = 1) {
     if ($null -eq $Value) { return "" }
-    return ([double]$Value).ToString("F$Decimals", [System.Globalization.CultureInfo]::InvariantCulture).TrimEnd("0").TrimEnd(".")
+    $formatted = ([double]$Value).ToString("F$Decimals", [System.Globalization.CultureInfo]::InvariantCulture)
+    if ($Decimals -le 0) { return $formatted }
+    return $formatted.TrimEnd("0").TrimEnd(".")
 }
 
 function Get-PeriodKey([string]$Period) {
