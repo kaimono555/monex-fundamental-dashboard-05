@@ -77,6 +77,22 @@ function Get-FinancialScore($Row) {
     return $score
 }
 
+function Get-FinancialIndustryProfitabilityScore($Row) {
+    $score = 0.0
+    $score += Add-ThresholdScore (Parse-Number $Row.roe) @(20, 15, 10, 5) @(12, 9, 6, 2)
+    $score += Add-ThresholdScore (Parse-Number $Row.operating_margin_5y) @(25, 15, 10, 5) @(8, 6, 4, 1)
+    if ($score -gt 20) { return 20.0 }
+    return $score
+}
+
+function Get-FinancialIndustryFinancialScore($Row) {
+    $score = 0.0
+    $score += Add-ThresholdScore (Parse-Number $Row.profit_streak_years) @(10, 7, 5, 3) @(12, 9, 6, 2)
+    $score += Add-ThresholdScore (Parse-Number $Row.dividend_increase_years) @(10, 7, 5, 3) @(8, 6, 4, 1)
+    if ($score -gt 20) { return 20.0 }
+    return $score
+}
+
 function Get-QualityRank([double]$Score) {
     if ($Score -ge 68) { return "A" }
     if ($Score -ge 56) { return "B" }
@@ -95,6 +111,18 @@ function Get-MissingDataCount($Row) {
         "sales_growth_5y", "operating_growth_5y", "ordinary_growth_5y", "net_income_growth_5y",
         "roe", "roic", "equity_ratio", "interest_bearing_debt_ratio",
         "operating_margin_5y", "profit_streak_years"
+    )
+    $count = 0
+    foreach ($field in $fields) {
+        if (-not ($Row.PSObject.Properties.Name -contains $field) -or [string]::IsNullOrWhiteSpace([string]$Row.$field)) { $count += 1 }
+    }
+    return $count
+}
+
+function Get-MissingDataCountFinancialIndustry($Row) {
+    $fields = @(
+        "sales_growth_5y", "operating_growth_5y", "ordinary_growth_5y", "net_income_growth_5y",
+        "roe", "operating_margin_5y", "profit_streak_years", "dividend_increase_years"
     )
     $count = 0
     foreach ($field in $fields) {
@@ -167,6 +195,24 @@ foreach ($row in @(Import-Csv -LiteralPath $InputPath -Encoding UTF8)) {
         $rank = Limit-RankToC $rank
     }
 
+    # 金融業向けバリアント（equity_ratio/interest_bearing_debt_ratioは銀行業に不適切なため使用しない）
+    $finIndProfitabilityScore = Get-FinancialIndustryProfitabilityScore $row
+    $finIndFinancialScore = Get-FinancialIndustryFinancialScore $row
+    $finIndMissingCount = Get-MissingDataCountFinancialIndustry $row
+    $finIndMissingPenalty = [math]::Min(20.0, [double]$finIndMissingCount * 2.0)
+    $finIndQualityScore = $growthScore + $finIndProfitabilityScore + $finIndFinancialScore - $finIndMissingPenalty
+    if ($finIndQualityScore -lt 0) { $finIndQualityScore = 0 }
+    $finIndRank = Get-QualityRank $finIndQualityScore
+    $finIndCapReasons = @()
+    if ($null -ne $operatingGrowth5y -and $operatingGrowth5y -lt 0) { $finIndCapReasons += "operating_growth_5y_negative" }
+    if ($null -ne $ordinaryGrowth5y -and $ordinaryGrowth5y -lt 0) { $finIndCapReasons += "ordinary_growth_5y_negative" }
+    if (([string]$row.forecast_loss).ToUpperInvariant() -eq "TRUE") { $finIndCapReasons += "forecast_loss" }
+    $finIndRankCap = "FALSE"
+    if ($finIndCapReasons.Count -gt 0) {
+        $finIndRankCap = "TRUE"
+        $finIndRank = Limit-RankToC $finIndRank
+    }
+
     $rows += [pscustomobject]@{
         rank = 0
         code = $row.code
@@ -182,6 +228,13 @@ foreach ($row in @(Import-Csv -LiteralPath $InputPath -Encoding UTF8)) {
         fetched_at = $row.fetched_at
         rank_cap = $rankCap
         rank_cap_reason = ($capReasons -join "|")
+        financial_industry_growth = Format-Score $growthScore
+        financial_industry_profitability = Format-Score $finIndProfitabilityScore
+        financial_industry_financial = Format-Score $finIndFinancialScore
+        financial_industry_quality_score = Format-Score $finIndQualityScore
+        financial_industry_quality_rank = $finIndRank
+        financial_industry_rank_cap = $finIndRankCap
+        financial_industry_rank_cap_reason = ($finIndCapReasons -join "|")
     }
 }
 
@@ -202,6 +255,13 @@ $rows = @($rows | ForEach-Object {
         stale_flag = $_.stale_flag
         data_as_of = $_.data_as_of
         fetched_at = $_.fetched_at
+        financial_industry_growth = $_.financial_industry_growth
+        financial_industry_profitability = $_.financial_industry_profitability
+        financial_industry_financial = $_.financial_industry_financial
+        financial_industry_quality_score = $_.financial_industry_quality_score
+        financial_industry_quality_rank = $_.financial_industry_quality_rank
+        financial_industry_rank_cap = $_.financial_industry_rank_cap
+        financial_industry_rank_cap_reason = $_.financial_industry_rank_cap_reason
     }
 })
 $rows | Export-Csv -LiteralPath $OutputPath -NoTypeInformation -Encoding UTF8
