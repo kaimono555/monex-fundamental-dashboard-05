@@ -10,6 +10,9 @@ data/raw/
 # 生成済み銘柄別財務CSV
 data/output/
 
+# 拡張パーサー生成CSV（CF/直近指標/EPS予想、04の10年業績・財務分析パネル向け・スクリプト再生成可能）
+data/output_extended/
+
 # パイプライン生成ファイル
 data/fetch_results.csv
 data/fetch_status.csv

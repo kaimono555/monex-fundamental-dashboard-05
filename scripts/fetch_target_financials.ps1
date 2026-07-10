@@ -303,6 +303,18 @@ foreach ($target in $targets) {
         try {
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "parse_financials.ps1") -BCode $code -RawDir $RawDir -OutputDir $OutputDir -LogPath $LogPath
             if ($LASTEXITCODE -ne 0) { throw "parse_financials failed exitCode=$LASTEXITCODE" }
+
+            # 04の10年業績・財務分析パネル向け拡張データ（CF/直近指標/EPS予想）を生成する。
+            # 既存の parse_financials.ps1 / $OutputDir / 既存ランキング処理には影響しない
+            # 独立出力（data/output_extended）であり、失敗しても本処理は継続する（非致命）。
+            try {
+                $extendedOutputDir = Join-Path (Split-Path $OutputDir -Parent) "output_extended"
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "parse_financials_extended.ps1") -BCode $code -RawDir $RawDir -OutputDir $extendedOutputDir -LogPath "logs/run_log_extended.txt" -DataAsOf $fetchedAt
+                if ($LASTEXITCODE -ne 0) { Write-RunLog "拡張パース失敗(非致命) bcode=$code exitCode=$LASTEXITCODE" }
+            } catch {
+                Write-RunLog "拡張パース例外(非致命) bcode=$code error=$($_.Exception.Message)"
+            }
+
             $dataAsOf = Get-LatestPeriod $csvPath
             $staleFlag = if ([string]::IsNullOrWhiteSpace($fetchedAt) -or [string]::IsNullOrWhiteSpace($dataAsOf)) { "true" } else { "false" }
             $statusRows += [pscustomobject]@{
