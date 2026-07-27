@@ -320,8 +320,12 @@ try {
 finally {
     try { Stop-Transcript | Out-Null } catch {}
     Write-Host ""
-    Write-Host "Enterキーを押すと閉じます。" -ForegroundColor Gray
-    Read-Host | Out-Null
+    # タスクスケジューラ等の無人実行（stdinリダイレクト）ではRead-Hostで待たない。
+    # 手動実行時（[Console]::IsInputRedirectedがfalse）のみ、従来どおりEnter待ちで一時停止する。
+    if (-not [Console]::IsInputRedirected) {
+        Write-Host "Enterキーを押すと閉じます。" -ForegroundColor Gray
+        Read-Host | Out-Null
+    }
 }
 
 exit $ExitCode
