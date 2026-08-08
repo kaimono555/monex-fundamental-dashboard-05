@@ -832,6 +832,87 @@ function apiRunUpdate(res) {
   }
 }
 
+// ── 04手動更新（04ダッシュボード(Vercel)ページ内からの実行・ライブログ表示用） ──
+// 04ページ(HTTPS)から http://127.0.0.1:8055 へのfetchを許可するため、
+// CORS + Private Network Access ヘッダを返す。許可オリジンは04本番と
+// ローカル確認(file://はOrigin:null)のみ。
+let update04Proc = null;
+const CORS_04_ORIGINS = new Set(["https://strong-stock-dashboard-04.vercel.app", "null"]);
+
+function cors04Headers(req) {
+  const origin = req.headers.origin || "";
+  const h = { "Cache-Control": "no-cache" };
+  if (CORS_04_ORIGINS.has(origin)) h["Access-Control-Allow-Origin"] = origin;
+  h["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS";
+  h["Access-Control-Allow-Headers"] = "content-type";
+  h["Access-Control-Max-Age"] = "600";
+  if (req.headers["access-control-request-private-network"]) {
+    h["Access-Control-Allow-Private-Network"] = "true";
+  }
+  return h;
+}
+
+function sendJson04(res, status, obj, corsH) {
+  res.writeHead(status, Object.assign({ "Content-Type": "application/json; charset=utf-8" }, corsH));
+  res.end(JSON.stringify(obj));
+}
+
+function find04Dir() {
+  const parent = path.join(ROOT, "..");
+  const name = fs.readdirSync(parent).find(n => n.startsWith("04_"));
+  return name ? path.join(parent, name) : null;
+}
+
+function apiRun04(req, res, corsH) {
+  if (update04Proc) return sendJson04(res, 409, { error: "既に実行中です", running: true }, corsH);
+  const bat = path.join(ROOT, "..", "run_04_only.bat");
+  if (!fs.existsSync(bat)) return sendJson04(res, 500, { error: "run_04_only.bat が見つかりません" }, corsH);
+  try {
+    // force: 営業日チェックをスキップ（手動実行の意図を優先） / quiet: バッチ側のライブログ別窓を開かない
+    const cmdline = `start "04 manual update" /wait cmd /c "call \"${bat}\" force quiet"`;
+    update04Proc = spawn("cmd.exe", ["/s", "/c", `"${cmdline}"`],
+      { cwd: path.join(ROOT, ".."), stdio: "ignore", windowsVerbatimArguments: true });
+    update04Proc.on("exit", () => { update04Proc = null; });
+    update04Proc.on("error", () => { update04Proc = null; });
+    sendJson04(res, 200, { started: true }, corsH);
+  } catch (e) {
+    update04Proc = null;
+    sendJson04(res, 500, { error: String(e && e.message || e) }, corsH);
+  }
+}
+
+// 最新の run_04_only_*.log をバイトオフセット差分で返す（実行ごとに新ファイルになるため
+// クライアントは file 名も往復させ、ファイルが替わったら末尾から読み直す）
+function apiLog04(req, res, corsH, fileParam, afterByte) {
+  const dir04 = find04Dir();
+  if (!dir04) return sendJson04(res, 500, { error: "04フォルダが見つかりません" }, corsH);
+  const logsDir = path.join(dir04, "logs");
+  let newest = null;
+  if (fs.existsSync(logsDir)) {
+    let best = -1;
+    for (const n of fs.readdirSync(logsDir)) {
+      if (!/^run_04_only_.*\.log$/.test(n)) continue;
+      const m = fs.statSync(path.join(logsDir, n)).mtimeMs;
+      if (m > best) { best = m; newest = n; }
+    }
+  }
+  if (!newest) return sendJson04(res, 200, { file: null, text: "", offset: 0, running: !!update04Proc }, corsH);
+  const full = path.join(logsDir, newest);
+  const size = fs.statSync(full).size;
+  let start = (fileParam === newest && Number.isFinite(afterByte) && afterByte >= 0 && afterByte <= size)
+    ? afterByte : Math.max(0, size - 16384);
+  let text = "";
+  if (start < size) {
+    const fd = fs.openSync(full, "r");
+    try {
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString("utf8"); // cmd echo行(cp932)は一部文字化けするが、更新本体の出力は読める
+    } finally { fs.closeSync(fd); }
+  }
+  sendJson04(res, 200, { file: newest, text, offset: size, running: !!update04Proc }, corsH);
+}
+
 // logs/run_log.txt をバイトオフセット差分で返す（09と同様のポーリング型ライブログ）
 function apiLogs(res, afterByte) {
   const logFile = path.join(ROOT, "logs", "run_log.txt");
@@ -856,6 +937,12 @@ const server = http.createServer((req, res) => {
   try {
     if (u.pathname === "/api/run-update" && req.method === "POST") return apiRunUpdate(res);
     if (u.pathname === "/api/logs") return apiLogs(res, parseInt(u.searchParams.get("after"), 10));
+    if (u.pathname === "/api/run-04" || u.pathname === "/api/log-04") {
+      const corsH = cors04Headers(req);
+      if (req.method === "OPTIONS") { res.writeHead(204, corsH); return res.end(); }
+      if (u.pathname === "/api/run-04" && req.method === "POST") return apiRun04(req, res, corsH);
+      if (u.pathname === "/api/log-04") return apiLog04(req, res, corsH, u.searchParams.get("file"), parseInt(u.searchParams.get("after"), 10));
+    }
     if (u.pathname === "/api/manual" && req.method === "POST") {
       return apiManual(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
     }
