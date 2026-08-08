@@ -16,7 +16,7 @@
 #   - 待機後も Enter は送信せず Chrome を開いたまま update を再実行する（確定手順と同じ形）。
 #     Enter送信→Chrome正常クローズだとIFIS側の揮発セッションCookieが消え、
 #     再取得が必ず認証エラーになるため（2026-08-08 run_log.txt で確認）。
-#     残った Chrome/node は update_all_05.ps1 の実行前クリーンアップが強制終了する。
+#     待機後にログインプロセスをツリーごと強制終了してから update を再実行する。
 #   - パスワード・認証情報は一切扱わない（ログインは人間がブラウザで行う）。
 
 param(
@@ -140,7 +140,7 @@ function Show-CountdownDialog([int]$Seconds) {
         $s = $script:remaining % 60
         $label.Text = "IFIS側セッションの安定化待機中です（短縮運用・約3分）。`n`n" +
             "Chromeと黒いPowerShell画面は閉じずにそのままにしてください。`n`n" +
-            ("残り {0}分{1:d2}秒 — 終了後、自動で再取得を開始します（Chromeはそのまま使われ、自動で閉じます）。" -f $m, $s)
+            ("残り {0}分{1:d2}秒 — 終了後、自動で再取得を開始します（Chromeは自動で終了します）。" -f $m, $s)
         if ($script:remaining -le 0) {
             $timer.Stop()
             $form.Close()
@@ -149,7 +149,7 @@ function Show-CountdownDialog([int]$Seconds) {
     $m0 = [math]::Floor($Seconds / 60); $s0 = $Seconds % 60
     $label.Text = "IFIS側セッションの安定化待機中です（短縮運用・約3分）。`n`n" +
         "Chromeと黒いPowerShell画面は閉じずにそのままにしてください。`n`n" +
-        ("残り {0}分{1:d2}秒 — 終了後、自動で再取得を開始します（Chromeはそのまま使われ、自動で閉じます）。" -f $m0, $s0)
+        ("残り {0}分{1:d2}秒 — 終了後、自動で再取得を開始します（Chromeは自動で終了します）。" -f $m0, $s0)
     $timer.Start()
     $form.ShowDialog() | Out-Null
     $timer.Dispose()
@@ -192,31 +192,24 @@ function Invoke-GuardedLogin {
         return ($proc.ExitCode -eq 0)
     }
 
-    # 待機完了。Enterは送信せず、Chromeを開いたまま update を再実行する（確定手順と同じ形）。
+    # 待機完了。Enterは送信せず、ログインプロセスをツリーごと強制終了してから update を再実行する。
     # Enter送信→ログインスクリプトがChromeを正常クローズすると、IFIS側の
     # セッションCookie（ブラウザ終了で消える揮発Cookie）が失われ、直後の再取得が
     # 再び認証エラーになる（2026-08-08 run_log.txt で確認:
     # 18:04:14 manual login verify ok=true → chrome closed → 18:04:18 認証エラー）。
-    # update_all_05.ps1 の実行前クリーンアップが残った Chrome/node を強制終了する
-    # （強制終了なら揮発Cookieはディスクに残る）ため、ここでは閉じずに戻る。
-    Write-Host "安定化待機が完了しました。Chromeを開いたまま再取得を開始します..." -ForegroundColor Cyan
-    $script:LoginProc = $proc
+    # taskkill /T /F の強制終了なら揮発Cookieはディスクに残る（確定手順と同じ形）。
+    # ログインスクリプト本体ごと終了させるので「ログイン更新が完了しませんでした」の
+    # 赤字メッセージも出ない。
+    Write-Host "安定化待機が完了しました。ログイン用Chromeを強制終了して再取得を開始します..." -ForegroundColor Cyan
+    try { & taskkill /PID $proc.Id /T /F 2>$null | Out-Null } catch {}
     return $true
 }
 
 # ── メインフロー ──────────────────────────────────────────
 $attempt = 0
-$script:LoginProc = $null
 while ($true) {
     $beforeLines = Get-RunLogLineCount
     $exitCode = Invoke-Update05
-
-    # ログイン用に開いたままにしていたプロセスの後始末
-    # （Chrome/node本体は update_all_05.ps1 側のクリーンアップで既に終了している）
-    if ($script:LoginProc) {
-        try { if (-not $script:LoginProc.HasExited) { $script:LoginProc.Kill() } } catch {}
-        $script:LoginProc = $null
-    }
 
     if ($exitCode -eq 0) {
         Write-Host ""
