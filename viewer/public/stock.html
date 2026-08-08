@@ -40,6 +40,34 @@
     <div class="body tbl-scroll" id="finTable"></div>
   </div>
 
+  <div class="panel" id="qtrPanel" style="display:none">
+    <h2>四半期業績推移（3か月）</h2>
+    <div class="body">
+      <h3 class="chart-title">売上高（3か月）</h3>
+      <div class="chart-box"><canvas id="qtrSalesChart"></canvas></div>
+      <div class="chart-note">単位: 百万円</div>
+      <h3 class="chart-title">利益（3か月・営業・経常・当期）</h3>
+      <div class="chart-box"><canvas id="qtrProfitChart"></canvas></div>
+      <div class="chart-note">単位: 百万円</div>
+      <div class="tbl-scroll" id="qtrTable" style="margin-top:12px"></div>
+      <p class="muted" id="qtrNote"></p>
+    </div>
+  </div>
+
+  <div class="panel" id="qtrCumPanel" style="display:none">
+    <h2>四半期業績推移（累積）</h2>
+    <div class="body">
+      <h3 class="chart-title">売上高（累積）</h3>
+      <div class="chart-box"><canvas id="qtrCumSalesChart"></canvas></div>
+      <div class="chart-note">単位: 百万円</div>
+      <h3 class="chart-title">利益（累積・営業・経常・当期）</h3>
+      <div class="chart-box"><canvas id="qtrCumProfitChart"></canvas></div>
+      <div class="chart-note">単位: 百万円</div>
+      <div class="tbl-scroll" id="qtrCumTable" style="margin-top:12px"></div>
+      <p class="muted" id="qtrCumNote"></p>
+    </div>
+  </div>
+
   <div class="panel">
     <h2>キャッシュフロー推移</h2>
     <div class="body">

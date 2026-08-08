@@ -120,3 +120,35 @@ table.list tr:hover td { background: #fff8e0; }
   font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; width: 260px;
 }
 .muted { color: var(--ink-3); font-size: 11px; }
+
+/* 業績データ貼付パネル */
+.paste-block textarea {
+  width: 100%; min-height: 200px; font: 12px/1.6 Consolas, monospace;
+  border: 1px solid var(--border); border-radius: 4px; padding: 10px;
+  resize: vertical;
+}
+.paste-block { margin-bottom: 14px; }
+.paste-block-head {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;
+}
+.paste-block-label { font-size: 12px; color: var(--ink-2); font-weight: bold; }
+.remove-block-btn {
+  font: inherit; font-size: 11px; padding: 2px 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 4px; background: #fff; color: var(--ink-2);
+}
+.add-block-btn {
+  font: inherit; width: 100%; padding: 8px; cursor: pointer;
+  border: 1px dashed var(--border); border-radius: 4px; background: #fff; color: #1a5fb4;
+}
+.actions { margin-top: 12px; display: flex; align-items: center; gap: 12px; }
+.actions button {
+  font: inherit; font-weight: bold; padding: 8px 28px; cursor: pointer;
+  background: var(--brand-dark); color: #fff; border: none; border-radius: 4px;
+}
+.actions button:disabled { opacity: .5; cursor: default; }
+#status.ok { color: var(--up); }
+#status.err { color: var(--down); }
+.result-row { border-bottom: 1px solid #e4e4de; padding: 8px 4px; display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.result-row .code { font-weight: bold; }
+.result-row .ok { color: var(--up); }
+.result-row .err { color: var(--down); }

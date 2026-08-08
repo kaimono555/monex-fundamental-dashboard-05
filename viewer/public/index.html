@@ -9,7 +9,7 @@
 <body>
 <div class="topbar">
   <div class="logo">銘柄スカウター <small>05 ローカルビューア</small></div>
-  <div class="nav"><a href="paste.html">業績データ貼付 → 実行</a>　<span class="muted" id="meta"></span></div>
+  <div class="nav"><a href="#pastePanel">↓ 業績データ貼付</a>　<span class="muted" id="meta"></span></div>
 </div>
 <div class="wrap">
   <div class="search-row">
@@ -40,7 +40,32 @@
       </table>
     </div>
   </div>
+
+  <div class="panel" id="pastePanel">
+    <h2>業績データ貼付 → 実行</h2>
+    <div class="body">
+      <p class="muted" style="font-size:12px">
+        マネックス銘柄スカウターの銘柄ページのテキストを貼り付けて「実行」を押すと、
+        銘柄コード・銘柄名を自動判別して <code>data/output/{コード}_financials.csv</code> に保存します
+        （キャッシュフロー推移・指標・EPS予想が含まれていればそれらも保存）。
+        既存データは<b>決算期単位でマージ</b>（同じ決算期は上書き・他の期は保持）。「予」の付く会社予想行は取り込みません。<br>
+        複数銘柄をまとめて処理する場合は「＋ 銘柄を追加」で貼付欄を増やしてください。1件ずつ順番に処理されます。
+      </p>
+      <div id="pasteBlocks"></div>
+      <button id="addBlockBtn" class="add-block-btn" type="button">＋ 銘柄を追加</button>
+      <div class="actions">
+        <button id="runBtn" type="button">実行</button>
+        <span id="status"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="resultPanel" style="display:none">
+    <h2>処理結果</h2>
+    <div class="body" id="resultList"></div>
+  </div>
 </div>
 <script src="list.js"></script>
+<script src="paste.js"></script>
 </body>
 </html>

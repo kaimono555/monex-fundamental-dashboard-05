@@ -1,9 +1,18 @@
 "use strict";
 (async () => {
-  const res = await fetch("/api/stocks");
-  const data = await res.json();
-  let rows = data.stocks.map(s => ({
+  let rows = [];
+
+  async function loadData() {
+    const res = await fetch("/api/stocks");
+    const data = await res.json();
+    rows = data.stocks.map(s => mapRow(s));
+    const asOf = rows.length ? (data.stocks[0].fetched_at || "") : "";
+    document.getElementById("meta").textContent = asOf ? `データ取得: ${asOf}` : "";
+  }
+
+  const mapRow = s => ({
     rank: Number(s.rank) || 9999,
+    rankLabel: s.rank !== "" && s.rank != null ? s.rank : "-",
     code: s.code,
     name: s.name,
     quality_rank: s.quality_rank,
@@ -15,7 +24,7 @@
     equity_ratio: s.fundamentals ? s.fundamentals.equity_ratio : "",
     data_as_of: s.data_as_of || "",
     fetched_at: s.fetched_at || "",
-  }));
+  });
 
   const tbody = document.querySelector("#tbl tbody");
   const q = document.getElementById("q");
@@ -32,7 +41,7 @@
     });
     tbody.innerHTML = view.map(r => `
       <tr>
-        <td>${r.rank}</td>
+        <td>${r.rankLabel}</td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.code}</a></td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.name}</a></td>
         <td><span class="rank-${r.quality_rank}">${r.quality_rank}</span></td>
@@ -58,7 +67,9 @@
   });
   q.addEventListener("input", render);
 
-  const asOf = rows.length ? (data.stocks[0].fetched_at || "") : "";
-  document.getElementById("meta").textContent = asOf ? `データ取得: ${asOf}` : "";
+  // 貼付パネル(paste.js)が保存完了後に一覧を更新するためのフック
+  window.refreshStockList = async () => { await loadData(); render(); };
+
+  await loadData();
   render();
 })();
