@@ -683,6 +683,26 @@ function safeCode(raw) {
   return /^[0-9A-Za-z]{1,6}$/.test(raw) ? raw : null;
 }
 
+// 09の自動決済監視状態（保有・監視中銘柄）を読む。
+// 09_*/runtime/auto_exit/auto_exit_state.json のキー＝監視対象の銘柄コード。
+// holding_quantity > 0 が保有中、0 は監視のみ（売却済み等）。読めない場合は null。
+function load09Holdings() {
+  try {
+    const parent = path.join(ROOT, "..");
+    const dir = fs.readdirSync(parent).find(n => n.startsWith("09_"));
+    if (!dir) return null;
+    const p = path.join(parent, dir, "runtime", "auto_exit", "auto_exit_state.json");
+    if (!fs.existsSync(p)) return null;
+    const state = JSON.parse(fs.readFileSync(p, "utf8"));
+    const map = new Map();
+    for (const [code, v] of Object.entries(state)) {
+      if (!v || typeof v !== "object") continue;
+      map.set(code, { qty: Number(v.holding_quantity ?? v.quantity ?? 0) || 0 });
+    }
+    return map;
+  } catch { return null; }
+}
+
 function apiStocks(res) {
   const scores = csvToObjects(path.join(DATA_DIR, "fundamental_scores.csv")) || [];
   const funds = csvToObjects(path.join(DATA_DIR, "fundamentals.csv")) || [];
@@ -728,6 +748,26 @@ function apiStocks(res) {
         growth: ms ? ms.growth : "", profitability: ms ? ms.profitability : "", financial: ms ? ms.financial : "",
         data_as_of: "", fetched_at: (ms && ms.mf && ms.mf.updated_at) || (ind ? (ind.data_as_of || "") : ""), manual: true,
         fundamentals: fmap.get(m[1]) || (ind ? { roe: ind.ROE || "", equity_ratio: ind["自己資本比率"] || "" } : null),
+      });
+    }
+  }
+
+  // 09の自動決済監視銘柄を反映: 既存行にはバッジ用フラグを付け、
+  // 一覧に無い銘柄は行として追加する（財務データ未取得の場合スコア欄は空）
+  const holdings = load09Holdings();
+  if (holdings) {
+    const tmap = new Map((csvToObjects(path.join(DATA_DIR, "target_codes.csv")) || []).map(r => [r.code, r.name]));
+    for (const s of list) {
+      const h = holdings.get(s.code);
+      if (h) { s.watch09 = true; s.holding = h.qty > 0; }
+    }
+    const known2 = new Set(list.map(s => s.code));
+    for (const [code, h] of holdings) {
+      if (known2.has(code)) continue;
+      list.push({
+        rank: "", code, name: tmap.get(code) || manualNames.get(code) || "(09監視銘柄)",
+        quality_rank: "", quality_score: "", growth: "", profitability: "", financial: "",
+        data_as_of: "", fetched_at: "", watch09: true, holding: h.qty > 0, fundamentals: null,
       });
     }
   }

@@ -24,6 +24,8 @@
     equity_ratio: s.fundamentals ? s.fundamentals.equity_ratio : "",
     data_as_of: s.data_as_of || "",
     fetched_at: s.fetched_at || "",
+    watch09: !!s.watch09,   // 09の自動決済監視に登録あり
+    holding: !!s.holding,   // うち保有中（数量>0）
   });
 
   const tbody = document.querySelector("#tbl tbody");
@@ -43,7 +45,7 @@
       <tr>
         <td>${r.rankLabel}</td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.code}</a></td>
-        <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.name}</a></td>
+        <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.name}</a>${r.watch09 ? `<span class="hold-badge ${r.holding ? "hold" : "watch"}">${r.holding ? "保有" : "監視"}</span>` : ""}</td>
         <td><span class="rank-${r.quality_rank}">${r.quality_rank}</span></td>
         <td>${r.quality_score}</td>
         <td>${r.growth}</td>
