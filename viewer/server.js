@@ -817,12 +817,14 @@ function apiRunUpdate(res) {
   const script = path.join(ROOT, "scripts", "run_update_05_guarded.ps1");
   if (!fs.existsSync(script)) return sendJson(res, 500, { error: "run_update_05_guarded.ps1 が見つかりません" });
   try {
-    updateProc = spawn("powershell.exe",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
-      { cwd: ROOT, detached: true, stdio: "ignore" });
+    // detached起動のpowershellはコンソールを持てず即終了する（何も実行されない）ため、
+    // cmd "start /wait" で可視のコンソールウィンドウ付きで起動する。
+    // ガードスクリプトのダイアログ・「黒い画面は閉じない」運用とも整合し、/wait で終了検知もできる。
+    const cmdline = `start "05 自動取り込み" /wait powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"`;
+    updateProc = spawn("cmd.exe", ["/s", "/c", `"${cmdline}"`],
+      { cwd: ROOT, stdio: "ignore", windowsVerbatimArguments: true });
     updateProc.on("exit", () => { updateProc = null; });
     updateProc.on("error", () => { updateProc = null; });
-    updateProc.unref();
     sendJson(res, 200, { started: true });
   } catch (e) {
     updateProc = null;
