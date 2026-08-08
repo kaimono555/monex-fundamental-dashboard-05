@@ -15,6 +15,8 @@
     rankLabel: s.rank !== "" && s.rank != null ? s.rank : "-",
     code: s.code,
     name: s.name,
+    current_price: Number(s.current_price) || 0,
+    price_as_of: s.price_as_of || "",
     quality_rank: s.quality_rank,
     quality_score: Number(s.quality_score) || 0,
     growth: Number(s.growth) || 0,
@@ -46,6 +48,7 @@
         <td>${r.rankLabel}</td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.code}</a></td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.name}</a>${r.watch09 ? `<span class="hold-badge ${r.holding ? "hold" : "watch"}">${r.holding ? "保有" : "監視"}</span>` : ""}</td>
+        <td title="${r.price_as_of}">${r.current_price ? r.current_price.toLocaleString("ja-JP") + "円" : "-"}</td>
         <td><span class="rank-${r.quality_rank}">${r.quality_rank}</span></td>
         <td>${r.quality_score}</td>
         <td>${r.growth}</td>

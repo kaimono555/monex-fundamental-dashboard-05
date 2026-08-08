@@ -171,6 +171,9 @@ foreach ($target in $targets) {
         $progressRate = Get-FirstRegexNumber $text @("対会社予想進捗率：\s*([\-0-9.,]+)\s*%", "進捗率\s*([\-0-9.,]+)\s*%")
         $dividendIncreaseYears = Get-FirstRegexNumber $text @("連続増配年数（直近実績）\s*([0-9]+)", "年間1株配当\s*予想配当利回り\s*[^\r\n]*?([0-9]+)期連続増配")
         $profitStreakYears = Get-ProfitStreakYears $text
+        $currentPrice = Get-FirstRegexNumber $text @("現在値\s*([\-0-9.,]+)\s*円")
+        $priceAsOfMatch = [regex]::Match($text, "現在値\s*[\-0-9.,]+\s*円\(([^)]+)\)")
+        $priceAsOf = if ($priceAsOfMatch.Success) { $priceAsOfMatch.Groups[1].Value.Trim() } else { "" }
 
         $resolvedName = Get-CompanyName $code $text $htmlPath
         if ([string]::IsNullOrWhiteSpace($resolvedName)) { $resolvedName = $targetName }
@@ -191,6 +194,8 @@ foreach ($target in $targets) {
             equity_ratio = Format-Number $equityRatio
             interest_bearing_debt_ratio = Format-Number $debtRatio
             analyst_rating = Format-Number $analystRating 2
+            current_price = Format-Number $currentPrice 1
+            price_as_of = $priceAsOf
             target_price_gap = Format-Number $targetGap
             progress_rate = Format-Number $progressRate
             sales_growth_3y = Format-Number (Get-Cagr $latestSales $base3Sales 3)
