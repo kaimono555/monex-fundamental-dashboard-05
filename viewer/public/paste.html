@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>業績データ貼付 → 実行 | 05 ローカルビューア</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  textarea {
+    width: 100%; min-height: 240px; font: 12px/1.6 Consolas, monospace;
+    border: 1px solid var(--border); border-radius: 4px; padding: 10px;
+    resize: vertical;
+  }
+  .form-row { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .form-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-2); }
+  .form-row input { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; }
+  .actions { margin-top: 10px; display: flex; align-items: center; gap: 12px; }
+  .actions button {
+    font: inherit; font-weight: bold; padding: 8px 28px; cursor: pointer;
+    background: var(--brand-dark); color: #fff; border: none; border-radius: 4px;
+  }
+  .actions button:disabled { opacity: .5; cursor: default; }
+  #status.ok { color: var(--up); }
+  #status.err { color: var(--down); }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">銘柄スカウター <small>05 ローカルビューア</small></div>
+  <div class="nav"><a href="index.html">← 銘柄一覧へ</a></div>
+</div>
+<div class="wrap">
+  <div class="panel">
+    <h2>業績データ貼付 → 実行</h2>
+    <div class="body">
+      <p class="muted" style="font-size:12px">
+        マネックス銘柄スカウターの通期業績テーブルをコピーして貼り付け、「実行」を押すと
+        <code>data/output/{コード}_financials.csv</code> に保存されます。
+        既存データがある銘柄は<b>決算期単位でマージ</b>されます（同じ決算期は上書き、それ以外の期は保持）。<br>
+        取り込む行は「2025/03 253,136 21,893 ...」のように決算期で始まる行です。
+        ヘッダー行（決算期 売上高 営業利益 …）も一緒に貼ると列の並びを自動判定します。
+      </p>
+      <div class="form-row">
+        <label>銘柄コード（必須）<input id="code" placeholder="例: 7203" maxlength="6"></label>
+        <label>銘柄名（任意・一覧表示用）<input id="name" placeholder="例: トヨタ自動車"></label>
+      </div>
+      <textarea id="text" placeholder="ここに通期業績テーブルのテキストを貼り付けてください&#10;例:&#10;決算期&#9;売上高&#9;営業利益&#9;経常利益&#9;当期利益&#9;EPS&#9;BPS&#10;2024/03&#9;221,920&#9;11,586&#9;12,750&#9;8,951&#9;58.6&#9;683.7&#10;2025/03&#9;253,136&#9;21,893&#9;23,071&#9;17,203&#9;112.6&#9;695.3"></textarea>
+      <div class="actions">
+        <button id="runBtn" type="button">実行</button>
+        <span id="status"></span>
+      </div>
+    </div>
+  </div>
+  <div class="panel" id="resultPanel" style="display:none">
+    <h2>取り込み結果</h2>
+    <div class="body">
+      <p id="resultSummary"></p>
+      <div class="tbl-scroll" id="resultTable"></div>
+      <p><a id="stockLink" href="#">→ この銘柄の詳細ページを開く</a></p>
+    </div>
+  </div>
+</div>
+<script>
+const btn = document.getElementById("runBtn");
+const statusEl = document.getElementById("status");
+function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ""; }
+
+btn.addEventListener("click", async () => {
+  const code = document.getElementById("code").value.trim();
+  const name = document.getElementById("name").value.trim();
+  const text = document.getElementById("text").value;
+  if (!/^[0-9A-Za-z]{1,6}$/.test(code)) { setStatus("銘柄コードを入力してください（英数字1〜6桁）", "err"); return; }
+  if (!text.trim()) { setStatus("テキストが空です。通期業績テーブルを貼り付けてください。", "err"); return; }
+  btn.disabled = true;
+  setStatus("保存中...", "");
+  try {
+    const res = await fetch("/api/manual", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, name, text }),
+    });
+    const d = await res.json();
+    if (!res.ok) { setStatus(d.error || "エラーが発生しました", "err"); return; }
+    setStatus(`保存しました（追加 ${d.added} 期 / 上書き ${d.updated} 期 / 合計 ${d.total} 期）`, "ok");
+    const cols = ["決算期", "売上高", "営業利益", "経常利益", "当期利益", "EPS", "BPS"];
+    document.getElementById("resultPanel").style.display = "";
+    document.getElementById("resultSummary").textContent =
+      `${code}${name ? "（" + name + "）" : ""}: 今回取り込んだ ${d.rows.length} 期分`;
+    document.getElementById("resultTable").innerHTML =
+      `<table class="data"><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr></thead><tbody>` +
+      d.rows.map(r => `<tr>${cols.map(c => `<td>${r[c] || "-"}</td>`).join("")}</tr>`).join("") +
+      `</tbody></table>`;
+    document.getElementById("stockLink").href = `stock.html?code=${encodeURIComponent(code)}`;
+  } catch (e) {
+    setStatus("通信エラー: " + e, "err");
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

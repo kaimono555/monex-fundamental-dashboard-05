@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 銘柄スカウター ローカルビューア</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">銘柄スカウター <small>05 ローカルビューア</small></div>
+  <div class="nav"><a href="paste.html">業績データ貼付 → 実行</a>　<span class="muted" id="meta"></span></div>
+</div>
+<div class="wrap">
+  <div class="search-row">
+    <input id="q" type="search" placeholder="コード・銘柄名で絞り込み">
+    <span class="muted" id="count"></span>
+  </div>
+  <div class="panel">
+    <h2>銘柄一覧（fundamental_scores.csv）</h2>
+    <div class="body tbl-scroll">
+      <table class="list" id="tbl">
+        <thead>
+          <tr>
+            <th data-k="rank">順位</th>
+            <th class="l" data-k="code">コード</th>
+            <th class="l" data-k="name">銘柄名</th>
+            <th data-k="quality_rank">ランク</th>
+            <th data-k="quality_score">スコア</th>
+            <th data-k="growth">成長性</th>
+            <th data-k="profitability">収益性</th>
+            <th data-k="financial">財務</th>
+            <th data-k="roe">ROE</th>
+            <th data-k="equity_ratio">自己資本比率</th>
+            <th class="l" data-k="data_as_of">決算期</th>
+            <th class="l" data-k="fetched_at">更新日時</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script src="list.js"></script>
+</body>
+</html>

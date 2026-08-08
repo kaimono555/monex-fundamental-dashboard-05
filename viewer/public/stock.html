@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>銘柄詳細 | 05 ローカルビューア</title>
+<link rel="stylesheet" href="style.css">
+<script src="vendor/chart.umd.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">銘柄スカウター <small>05 ローカルビューア</small></div>
+  <div class="nav"><a href="index.html">← 銘柄一覧へ</a></div>
+</div>
+<div class="wrap">
+  <div class="stock-head" id="head"></div>
+
+  <div class="panel">
+    <h2>スコア</h2>
+    <div class="body ind-grid" id="scoreGrid"></div>
+  </div>
+
+  <div class="panel">
+    <h2>通期業績推移</h2>
+    <div class="body">
+      <h3 class="chart-title">売上高</h3>
+      <div class="chart-box"><canvas id="salesChart"></canvas></div>
+      <div class="chart-note">単位: 百万円</div>
+      <h3 class="chart-title">利益（営業・経常・当期）</h3>
+      <div class="chart-box"><canvas id="profitChart"></canvas></div>
+      <div class="chart-note">単位: 百万円</div>
+      <h3 class="chart-title">EPS・BPS</h3>
+      <div class="chart-box"><canvas id="epsChart"></canvas></div>
+      <div class="chart-note">単位: 円</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>通期業績（数値）</h2>
+    <div class="body tbl-scroll" id="finTable"></div>
+  </div>
+
+  <div class="panel">
+    <h2>キャッシュフロー推移</h2>
+    <div class="body">
+      <div class="chart-box"><canvas id="cfChart"></canvas></div>
+      <div class="chart-note">単位: 百万円</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>キャッシュフロー（数値）</h2>
+    <div class="body tbl-scroll" id="cfTable"></div>
+  </div>
+
+  <div class="panel">
+    <h2>指標一覧</h2>
+    <div class="body ind-grid" id="indGrid"></div>
+  </div>
+</div>
+<script src="stock.js"></script>
+</body>
+</html>
