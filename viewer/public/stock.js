@@ -141,13 +141,15 @@
       }
       return `<tr>${tds}</tr>`;
     }).join("");
+    // 通期の速報値は前期比、四半期（区分あり）の速報値は前年比（本家表記に合わせる）
+    const pctLabel = block.hasKubun ? "(前年比)" : "(前期比)";
     const heads = ["決算期"];
     if (block.hasKubun) heads.push("区分");
-    heads.push("売上高", "(前期比)", "営業利益", "(前期比)", "経常利益", "(前期比)", "当期利益", "(前期比)");
+    heads.push("売上高", pctLabel, "営業利益", pctLabel, "経常利益", pctLabel, "当期利益", pctLabel);
     el.innerHTML =
       `<div class="flash-title">速報値（${block.date}）</div>` +
       `<div class="tbl-scroll"><table class="data"><thead><tr>${heads.map((h, i) =>
-        `<th class="${h === "(前期比)" ? "pct" : ""}${i === 0 ? " l" : ""}">${h}</th>`).join("")}</tr></thead>` +
+        `<th class="${h === pctLabel ? "pct" : ""}${i === 0 ? " l" : ""}">${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${rowsHtml}</tbody></table></div>`;
   }
   for (const block of (d.flash || [])) {
@@ -218,8 +220,35 @@
       },
       plugins: [bands],
     });
-    document.getElementById(`${prefix}Table`).innerHTML =
-      tableHtml(["決算期", "区分", "売上高", "営業利益", "経常利益", "当期利益"], rows);
+    // 前年比（前年同四半期比・|前年|分母方式）付きテーブル
+    (function renderQtrTable() {
+      const metrics = ["売上高", "営業利益", "経常利益", "当期利益"];
+      const byPeriod = new Map(rows.map(r => [r["決算期"], r]));
+      const yoyPrev = period => {
+        const m = String(period).match(/^(\d{4})\/(\d{1,2})/);
+        return m ? byPeriod.get(`${m[1] - 1}/${m[2]}`) : null;
+      };
+      const pct = (cur, prev) => {
+        const c = num(cur), p = prev ? num(prev) : null;
+        if (c == null || p == null || isNaN(c) || isNaN(p) || p === 0) return "";
+        return (((c - p) / Math.abs(p)) * 100).toFixed(1) + "%";
+      };
+      const head = "<tr><th>決算期</th><th>区分</th>" +
+        metrics.map(c => `<th>${c}</th><th class="pct">(前年比)</th>`).join("") + "</tr>";
+      const body = rows.map(r => {
+        const prev = yoyPrev(r["決算期"]);
+        let cells = `<td>${r["決算期"]}</td><td>${r["区分"] || "-"}</td>`;
+        for (const c of metrics) {
+          const n = num(r[c]);
+          cells += `<td class="${n != null && n < 0 ? "neg" : ""}">${fmt(r[c])}</td>`;
+          const pv = prev ? pct(r[c], prev[c]) : "";
+          cells += `<td class="pct ${pv.startsWith("-") ? "neg" : ""}">${pv || "-"}</td>`;
+        }
+        return `<tr>${cells}</tr>`;
+      }).join("");
+      document.getElementById(`${prefix}Table`).innerHTML =
+        `<table class="data"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    })();
     document.getElementById(`${prefix}Note`).textContent =
       "※ 自動取得済みの履歴（raw HTML内の詳細テーブル）に、貼付で取り込んだ速報値・四半期を重ねて表示しています";
   }
