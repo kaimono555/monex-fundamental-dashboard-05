@@ -647,12 +647,21 @@ function apiStocks(res) {
 }
 
 function apiStock(res, code) {
-  const financials = csvToObjects(path.join(DATA_DIR, "output", `${code}_financials.csv`));
+  let financials = csvToObjects(path.join(DATA_DIR, "output", `${code}_financials.csv`));
   if (!financials) return sendJson(res, 404, { error: `code ${code} not found` });
+  // 防御: 四半期速報値の誤取り込み行（決算期に New を含む）が混入していても表示しない
+  financials = financials.filter(r => !/New/.test(String(r["決算期"])));
   const cashflow = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_cashflow.csv`));
   const quarterly = combinedQuarterly(code, "3か月", "quarterly");
   const quarterlyCum = combinedQuarterly(code, "累積", "quarterly_cum");
-  const forecast = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_forecast.csv`)) || [];
+  // 会社予想: 貼付保存分があればそれを優先。無ければ raw テキスト（自動取得時点）から抽出
+  let forecast = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_forecast.csv`)) || [];
+  if (!forecast.length) {
+    const rawTxt = path.join(DATA_DIR, "raw", `${code}.txt`);
+    if (fs.existsSync(rawTxt)) {
+      try { forecast = parsePastedEpsForecast(fs.readFileSync(rawTxt, "utf8")).full; } catch { forecast = []; }
+    }
+  }
   const indicators = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_latest_indicators.csv`));
   const epsForecast = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_eps_forecast.csv`));
   const funds = csvToObjects(path.join(DATA_DIR, "fundamentals.csv")) || [];

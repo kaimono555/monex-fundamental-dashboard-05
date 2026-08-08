@@ -85,9 +85,38 @@
   document.getElementById("finTable").innerHTML = tableHtml(finCols, finAll);
 
   // ---- 四半期業績推移（3か月・累積）: データがある場合のみ表示 ----
+  // 年度（区分「本」で区切る）ごとに交互グレー帯を敷いて1年の区切りを分かりやすくする（本家スカウターと同様）
+  function fiscalYearBandsPlugin(rows) {
+    const groups = [];
+    let start = 0;
+    rows.forEach((r, i) => {
+      if (r["区分"] === "本") { groups.push({ start, end: i }); start = i + 1; }
+    });
+    if (start < rows.length) groups.push({ start, end: rows.length - 1 });
+    return {
+      id: "fiscalYearBands",
+      beforeDatasetsDraw(chart) {
+        const { ctx, chartArea, scales: { x } } = chart;
+        if (!chartArea || !x) return;
+        ctx.save();
+        ctx.fillStyle = "rgba(110, 110, 140, 0.08)";
+        groups.forEach((g, gi) => {
+          if (gi % 2 === 0) return; // 1年度おきに帯を敷く
+          const left = g.start === 0 ? chartArea.left
+            : (x.getPixelForValue(g.start - 1) + x.getPixelForValue(g.start)) / 2;
+          const right = g.end >= rows.length - 1 ? chartArea.right
+            : (x.getPixelForValue(g.end) + x.getPixelForValue(g.end + 1)) / 2;
+          ctx.fillRect(left, chartArea.top, right - left, chartArea.bottom - chartArea.top);
+        });
+        ctx.restore();
+      },
+    };
+  }
+
   function renderQuarterly(prefix, rows) {
     if (!rows.length) return;
     document.getElementById(`${prefix}Panel`).style.display = "";
+    const bands = fiscalYearBandsPlugin(rows);
     const qLabels = rows.map(r => r["決算期"] + (r["区分"] ? ` ${r["区分"]}` : ""));
     new Chart(document.getElementById(`${prefix}SalesChart`), {
       type: "bar",
@@ -100,6 +129,7 @@
         plugins: { legend: { display: false } },
         scales: commonScales,
       },
+      plugins: [bands],
     });
     new Chart(document.getElementById(`${prefix}ProfitChart`), {
       type: "bar",
@@ -113,6 +143,7 @@
         plugins: { legend: { position: "top", labels: { color: "#1f2328", boxWidth: 12 } } },
         scales: commonScales,
       },
+      plugins: [bands],
     });
     document.getElementById(`${prefix}Table`).innerHTML =
       tableHtml(["決算期", "区分", "売上高", "営業利益", "経常利益", "当期利益"], rows);

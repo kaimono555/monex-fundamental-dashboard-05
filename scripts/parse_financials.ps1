@@ -114,6 +114,13 @@ function Parse-FinancialsFromText {
             continue
         }
 
+        # 決算発表直後にページへ挿入される四半期速報値行（例: 2026/06 New 1Q 402,009 50.1% ...）は
+        # 通期業績ではないため除外する（2026-08-08 に列ズレ誤取り込みが発生）。
+        # 決算期に「New」を含む行、または2列目が四半期区分（1Q/2Q/3Q/本/中）の行は通期業績行ではない。
+        # ※「2027/03予」等の会社予想行は既存の ^\d{4}/\d{2}\b 判定で従来どおり除外される。
+        if ($period -match "New") { continue }
+        if ($columns.Count -ge 2 -and $columns[1].Trim() -match "^(本|中|[1-4]Q)$") { continue }
+
         $sales = Normalize-FinancialValue $columns[1]
         $operatingProfit = Normalize-FinancialValue $columns[3]
         $ordinaryProfit = Normalize-FinancialValue $columns[5]
