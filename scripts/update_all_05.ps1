@@ -69,6 +69,40 @@ function Write-WarnBox($msg) {
     Write-Host "----------------------------------------------------" -ForegroundColor Yellow
 }
 
+# run_project.ps1 失敗時、直近の logs\run_log.txt に「login not ready」が
+# 記録されていればログインセッション切れとみなし、最前面にポップアップで知らせる。
+# （自動実行モードは人間の入力を待たず即エラー終了するだけなので、
+#   PCの前にいないと気づけない問題への対処。判定・通知のみ追加し、
+#   既存の取得・commit/pushロジックには一切手を入れない。）
+function Show-LoginAlertIfNeeded {
+    param([string]$RunLogPath)
+    try {
+        if (-not (Test-Path -LiteralPath $RunLogPath)) { return }
+        $tail = Get-Content -LiteralPath $RunLogPath -Tail 20 -Encoding UTF8 -ErrorAction SilentlyContinue
+        if (-not $tail) { return }
+        $loginNotReady = $tail | Where-Object { $_ -match "login not ready" }
+        if (-not $loginNotReady) { return }
+
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        Add-Type -AssemblyName System.Drawing | Out-Null
+        $form = New-Object System.Windows.Forms.Form
+        $form.TopMost = $true
+        $form.Width = 0
+        $form.Height = 0
+        $form.StartPosition = "CenterScreen"
+        [System.Windows.Forms.MessageBox]::Show(
+            $form,
+            "login_monex_profile_05.bat を起動してマネックス証券にログインしてください。",
+            "05 マネックス銘柄スカウター - ログイン切れ",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        $form.Dispose()
+    } catch {
+        Write-Host "  [warn] ログイン切れポップアップの表示に失敗しました: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 # 05専用プロファイル（playwright-profile\monex-login-profile）を掴んでいる
 # 残存プロセスだけを安全に検出して終了する。
 # 通常Chromeや他プロジェクトのChrome/Nodeを巻き込まないよう、CommandLineに
@@ -156,6 +190,7 @@ try {
         if (-not (Test-Path $runProject)) { throw "scripts\run_project.ps1 が見つかりません。" }
         & powershell -NoProfile -ExecutionPolicy Bypass -File $runProject
         if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
+            Show-LoginAlertIfNeeded -RunLogPath (Join-Path $ProjectDir "logs\run_log.txt")
             throw "scripts\run_project.ps1 が異常終了しました（exit code: $LASTEXITCODE）。"
         }
 

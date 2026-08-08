@@ -4,6 +4,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const { spawn } = require("child_process");
 
 const PORT = 8055;
 const HOST = "0.0.0.0";
@@ -709,9 +710,51 @@ function serveStatic(res, urlPath) {
   });
 }
 
+// ── 手動取り込み実行（run_update_05_guarded.ps1 起動）とログのライブ配信 ──
+let updateProc = null; // 実行中プロセス（多重起動防止）
+
+function apiRunUpdate(res) {
+  if (updateProc) return sendJson(res, 409, { error: "既に実行中です", running: true });
+  const script = path.join(ROOT, "scripts", "run_update_05_guarded.ps1");
+  if (!fs.existsSync(script)) return sendJson(res, 500, { error: "run_update_05_guarded.ps1 が見つかりません" });
+  try {
+    updateProc = spawn("powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+      { cwd: ROOT, detached: true, stdio: "ignore" });
+    updateProc.on("exit", () => { updateProc = null; });
+    updateProc.on("error", () => { updateProc = null; });
+    updateProc.unref();
+    sendJson(res, 200, { started: true });
+  } catch (e) {
+    updateProc = null;
+    sendJson(res, 500, { error: String(e && e.message || e) });
+  }
+}
+
+// logs/run_log.txt をバイトオフセット差分で返す（09と同様のポーリング型ライブログ）
+function apiLogs(res, afterByte) {
+  const logFile = path.join(ROOT, "logs", "run_log.txt");
+  if (!fs.existsSync(logFile)) return sendJson(res, 200, { text: "", offset: 0, running: !!updateProc });
+  const size = fs.statSync(logFile).size;
+  let start = Number.isFinite(afterByte) && afterByte >= 0 ? afterByte : Math.max(0, size - 16384);
+  if (start > size) start = Math.max(0, size - 16384); // ログローテーション等でサイズが縮んだ場合
+  let text = "";
+  if (start < size) {
+    const fd = fs.openSync(logFile, "r");
+    try {
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString("utf8");
+    } finally { fs.closeSync(fd); }
+  }
+  sendJson(res, 200, { text, offset: size, running: !!updateProc });
+}
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, "http://localhost");
   try {
+    if (u.pathname === "/api/run-update" && req.method === "POST") return apiRunUpdate(res);
+    if (u.pathname === "/api/logs") return apiLogs(res, parseInt(u.searchParams.get("after"), 10));
     if (u.pathname === "/api/manual" && req.method === "POST") {
       return apiManual(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
     }

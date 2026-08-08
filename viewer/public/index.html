@@ -12,6 +12,14 @@
   <div class="nav"><a href="#pastePanel">↓ 業績データ貼付</a>　<span class="muted" id="meta"></span></div>
 </div>
 <div class="wrap">
+  <div class="ops-bar">
+    <button id="runUpdateBtn" type="button">▶ 自動取り込みを実行（60銘柄）</button>
+    <span class="ops-status" id="opsStatus"><span class="dot idle"></span>停止中</span>
+    <span class="muted">実行するとサーバーPC上でChrome・ダイアログが開きます（セッション切れ時はログイン誘導）</span>
+    <button id="logToggleBtn" type="button" class="log-toggle">ログを隠す</button>
+  </div>
+  <pre id="logBox" class="log-box"></pre>
+
   <div class="search-row">
     <input id="q" type="search" placeholder="コード・銘柄名で絞り込み">
     <span class="muted" id="count"></span>
@@ -67,5 +75,6 @@
 </div>
 <script src="list.js"></script>
 <script src="paste.js"></script>
+<script src="ops.js"></script>
 </body>
 </html>
