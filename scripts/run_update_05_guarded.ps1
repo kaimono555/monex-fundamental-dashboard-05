@@ -18,7 +18,7 @@
 #   - パスワード・認証情報は一切扱わない（ログインは人間がブラウザで行う）。
 
 param(
-    [int]$StabilizeSeconds = 360,   # ログイン後の安定化待機（確定手順の5〜6分）
+    [int]$StabilizeSeconds = 180,   # ログイン後の安定化待機（2026-08-08 ユーザー判断で6分→3分に短縮）
     [int]$MaxRetries = 2            # ログイン→再実行のリトライ上限
 )
 
@@ -136,7 +136,7 @@ function Show-CountdownDialog([int]$Seconds) {
         $script:remaining -= 1
         $m = [math]::Floor($script:remaining / 60)
         $s = $script:remaining % 60
-        $label.Text = "IFIS側セッションの安定化待機中です（確定手順の5〜6分待ち）。`n`n" +
+        $label.Text = "IFIS側セッションの安定化待機中です（短縮運用・約3分）。`n`n" +
             "Chromeと黒いPowerShell画面は閉じずにそのままにしてください。`n`n" +
             ("残り {0}分{1:d2}秒 — 終了後、自動でログイン保存と再取得を行います。" -f $m, $s)
         if ($script:remaining -le 0) {
@@ -145,7 +145,7 @@ function Show-CountdownDialog([int]$Seconds) {
         }
     })
     $m0 = [math]::Floor($Seconds / 60); $s0 = $Seconds % 60
-    $label.Text = "IFIS側セッションの安定化待機中です（確定手順の5〜6分待ち）。`n`n" +
+    $label.Text = "IFIS側セッションの安定化待機中です（短縮運用・約3分）。`n`n" +
         "Chromeと黒いPowerShell画面は閉じずにそのままにしてください。`n`n" +
         ("残り {0}分{1:d2}秒 — 終了後、自動でログイン保存と再取得を行います。" -f $m0, $s0)
     $timer.Start()
