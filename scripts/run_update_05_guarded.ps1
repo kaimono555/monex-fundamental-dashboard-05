@@ -57,9 +57,12 @@ function Test-LoginNotReadySince([int]$BeforeCount) {
 
 function Invoke-Update05 {
     # stdinをNULにして実行し、update_all_05.ps1末尾のEnter待ちをスキップする
+    # 注意: cmd の出力は必ず Out-Host に流すこと。パイプラインに残すと関数の戻り値に
+    # 出力全体が混ざり、呼び出し側の「-eq 0」が配列フィルタになって成功(exit 0)でも
+    # @(0)→偽と評価され、成功が常に失敗扱いになる（2026-08-08 実地で発生）。
     Write-Host ""
     Write-Host "==== update_all_05.ps1 を実行します ====" -ForegroundColor Cyan
-    cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File `"$UpdateScript`" <nul"
+    cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File `"$UpdateScript`" <nul" | Out-Host
     return $LASTEXITCODE
 }
 
