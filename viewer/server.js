@@ -77,9 +77,42 @@ function normNum(s) {
   if (t === "" || t === "-" || t === "--") return "";
   return /^-?\d+(\.\d+)?$/.test(t) ? t : null; // null = 数値でない
 }
-function parsePastedFinancials(text) {
-  const lines = text.split(/\r?\n/);
-  let colOrder = FIN_COLS.slice(1); // ヘッダー未検出時の既定順
+// 貼付テキスト先頭部から「7826 フルヤ金属」のような行を探して銘柄コード・銘柄名を抽出
+function extractCodeName(lines) {
+  for (const line of lines.slice(0, 40)) {
+    const m = line.trim().match(/^([0-9]{4}|[0-9]{3}[A-Z])\s+(\S.*)$/);
+    if (!m) continue;
+    const name = m[2].trim()
+      .replace(/[（(]株[）)]$/, "").replace(/^[（(]株[）)]/, "")
+      .replace(/株式会社$/, "").replace(/^株式会社/, "").trim();
+    return { code: m[1], name };
+  }
+  return null;
+}
+
+// startKw を含む行から、※注記行・次セクションの手前までを切り出す
+function sliceSection(lines, startKw, endKws) {
+  const start = lines.findIndex(l => l.includes(startKw));
+  if (start === -1) return null;
+  const out = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith("※") || endKws.some(k => t.includes(k))) break;
+    out.push(lines[i]);
+  }
+  return out;
+}
+
+function parseDataRow(line, minNums) {
+  const cells = (line.includes("\t") ? line.split("\t") : line.trim().split(/\s+/)).map(c => c.trim());
+  if (!cells.length || !/^\d{4}\/\d{1,2}/.test(cells[0])) return null;
+  if (cells[0].includes("予")) return null; // 会社予想行は取り込まない
+  const nums = cells.slice(1).map(normNum).filter(v => v !== null);
+  if (nums.length < minNums) return null;
+  return { period: cells[0], nums };
+}
+
+function detectColOrder(lines) {
   for (const line of lines) {
     const cells = line.split(/\t|\s{2,}| /).map(c => c.trim()).filter(Boolean);
     if (!cells.some(c => c.includes("決算期"))) continue;
@@ -89,18 +122,152 @@ function parsePastedFinancials(text) {
         if (COL_ALIASES[col].some(a => c.replace(/（.*?）|\(.*?\)/g, "") === a)) { mapped.push(col); break; }
       }
     }
-    if (mapped.length >= 4) { colOrder = mapped; break; }
+    if (mapped.length >= 4) return mapped;
   }
+  return null;
+}
+
+function parsePastedFinancials(text) {
+  const lines = text.split(/\r?\n/);
+  // 「通期業績推移」セクションがあればその範囲のみ解析（CF・貸借対照表等の誤取り込み防止）。
+  // 無ければ単純なテーブル貼付とみなし全行を走査（数値6個以上の行のみ）
+  const section = sliceSection(lines, "通期業績推移", ["四半期業績推移", "速報値", "平均成長率", "キャッシュフロー推移"]);
+  const target = section || lines;
+  const minNums = section ? 4 : 6;
+  // 列順: セクション内にヘッダーがあればそれを使う。セクション外のヘッダー（速報値表など）は
+  // 列数が異なるため参照せず、既定の6列順（売上高〜BPS）とする
+  const colOrder = section
+    ? (detectColOrder(section) || FIN_COLS.slice(1))
+    : (detectColOrder(lines) || FIN_COLS.slice(1));
   const rows = [];
-  for (const line of lines) {
-    const cells = (line.includes("\t") ? line.split("\t") : line.trim().split(/\s+/)).map(c => c.trim());
-    if (!cells.length || !/^\d{4}\/\d{1,2}/.test(cells[0])) continue;
-    const period = cells[0];
-    const nums = cells.slice(1).map(normNum).filter(v => v !== null);
-    if (!nums.length) continue;
-    const row = { "決算期": period };
-    colOrder.forEach((col, i) => { row[col] = nums[i] !== undefined ? nums[i] : ""; });
+  for (const line of target) {
+    const parsed = parseDataRow(line, minNums);
+    if (!parsed) continue;
+    const row = { "決算期": parsed.period };
+    colOrder.forEach((col, i) => { row[col] = parsed.nums[i] !== undefined ? parsed.nums[i] : ""; });
     for (const col of FIN_COLS) if (!(col in row)) row[col] = "";
+    rows.push(row);
+  }
+  return rows;
+}
+
+// 貼付テキストから予想行（「2027/06予 ...」）のEPSを抽出 → eps_forecast 用
+function parsePastedEpsForecast(text) {
+  const lines = text.split(/\r?\n/);
+  const section = sliceSection(lines, "通期業績推移", ["四半期業績推移", "速報値", "平均成長率", "キャッシュフロー推移"]) || lines;
+  const out = [];
+  for (const line of section) {
+    const cells = (line.includes("\t") ? line.split("\t") : line.trim().split(/\s+/)).map(c => c.trim());
+    if (!cells.length || !/^\d{4}\/\d{1,2}.*予/.test(cells[0])) continue;
+    const nums = cells.slice(1).map(normNum).filter(v => v !== null);
+    if (nums.length < 5) continue;
+    const eps = nums[4]; // 売上高,営業,経常,当期,EPS,BPS の並び
+    if (eps !== "" && eps !== undefined) {
+      out.push({ "決算期": cells[0].match(/^\d{4}\/\d{1,2}予?/)[0], "EPS予想": eps, "区分": "会社予想" });
+    }
+  }
+  return out;
+}
+
+// タブ区切りセルの「ラベル → 直後の数値」ペアを抽出する共通処理
+function cellValue(cells, i) {
+  for (let j = i + 1; j < cells.length && j <= i + 2; j++) {
+    const first = String(cells[j]).trim().split(/\s+/)[0];
+    const n = normNum(String(first).replace(/[%％倍期回]|以上$/g, ""));
+    if (n !== null && n !== "") return n;
+  }
+  return null;
+}
+
+const IND_COLS = ["ROE", "ROIC", "PER予想", "PBR", "自己資本比率", "有利子負債比率", "ネットD_Eレシオ", "data_as_of"];
+const IND_ALIASES = {
+  "ROE": ["実績ROE", "ROE(実)", "ROE（実）"],
+  "ROIC": ["ROIC", "ROIC(実)", "ROIC（実）"],
+  "PER予想": ["予想PER（会社予想）", "予想PER(会社予想)", "PER(予)", "PER（予）"],
+  "PBR": ["PBR", "PBR(実)", "PBR（実）"],
+  "自己資本比率": ["自己資本比率"],
+  "有利子負債比率": ["有利子負債比率", "有利子負債率"],
+  "ネットD_Eレシオ": ["ネットD/Eレシオ", "ネットD_Eレシオ"],
+};
+function parsePastedIndicators(text) {
+  const out = {};
+  for (const line of text.split(/\r?\n/)) {
+    const cells = line.split("\t").map(c => c.trim());
+    for (let i = 0; i < cells.length; i++) {
+      for (const col of Object.keys(IND_ALIASES)) {
+        if (out[col] !== undefined) continue;
+        if (IND_ALIASES[col].includes(cells[i])) {
+          const v = cellValue(cells, i);
+          if (v !== null) out[col] = v;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// 指標一覧の残り（成長率・レーティング等）→ ビューア専用 manual_fundamentals.csv
+const MF_COLS = ["code", "analyst_rating", "target_price_gap", "progress_rate",
+  "sales_growth_3y", "sales_growth_5y", "operating_growth_3y", "operating_growth_5y",
+  "ordinary_growth_3y", "ordinary_growth_5y", "net_income_growth_3y", "net_income_growth_5y",
+  "operating_margin_3y", "operating_margin_5y", "黒字継続年数", "dividend_increase_years", "updated_at"];
+function parsePastedExtras(text) {
+  const out = {};
+  const lines = text.split(/\r?\n/);
+  const growthCols = ["sales", "operating", "ordinary", "net_income"];
+  for (let li = 0; li < lines.length; li++) {
+    const cells = lines[li].split("\t").map(c => c.trim());
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
+      if (c === "進捗率" && out.progress_rate === undefined) {
+        const v = cellValue(cells, i); if (v !== null) out.progress_rate = v;
+      }
+      if (c.startsWith("連続増配年数") && out.dividend_increase_years === undefined) {
+        const v = cellValue(cells, i); if (v !== null) out.dividend_increase_years = v;
+      }
+      if (c.startsWith("連続黒字年数（営業利益）") && out["黒字継続年数"] === undefined) {
+        const v = cellValue(cells, i); if (v !== null) out["黒字継続年数"] = v;
+      }
+      if ((c === "3年平均成長率" || c === "5年平均成長率")) {
+        const suffix = c[0] === "3" ? "3y" : "5y";
+        const nums = cells.slice(i + 1).map(x => normNum(x.replace(/[%％]/g, ""))).filter(v => v !== null && v !== "");
+        nums.slice(0, 4).forEach((n, k) => {
+          const key = `${growthCols[k]}_growth_${suffix}`;
+          if (out[key] === undefined) out[key] = n;
+        });
+      }
+      if ((c === "3年平均利益率" || c === "5年平均利益率")) {
+        const suffix = c[0] === "3" ? "3y" : "5y";
+        // 列並びは 売上高(-)・営業・経常・当期。営業=ラベル直後の2列目
+        const after = cells.slice(i + 1);
+        const op = after.length > 1 ? normNum(after[1].replace(/[%％]/g, "")) : null;
+        if (op !== null && op !== "" && out[`operating_margin_${suffix}`] === undefined) {
+          out[`operating_margin_${suffix}`] = op;
+        }
+      }
+    }
+    // 「レーティング  目標株価(対株価)」ヘッダーの次行に「5.0 強気  57.8% 割安」
+    if (cells.includes("レーティング") && cells.some(x => x.includes("目標株価")) && lines[li + 1]) {
+      const next = lines[li + 1].split("\t").map(c => c.trim());
+      const nums = next.map(x => normNum(String(x).split(/\s+/)[0].replace(/[%％]/g, ""))).filter(v => v !== null && v !== "");
+      if (nums[0] !== undefined && out.analyst_rating === undefined) out.analyst_rating = nums[0];
+      if (nums[1] !== undefined && out.target_price_gap === undefined) out.target_price_gap = nums[1];
+    }
+  }
+  return out;
+}
+
+const CF_COLS = ["決算期", "営業CF", "投資CF", "財務CF", "現金同等物", "フリーCF"];
+function parsePastedCashflow(text) {
+  const lines = text.split(/\r?\n/);
+  const section = sliceSection(lines, "キャッシュフロー推移", ["貸借対照表", "設備投資", "指標一覧"]);
+  if (!section) return [];
+  const rows = [];
+  for (const line of section) {
+    const parsed = parseDataRow(line, 5);
+    if (!parsed) continue;
+    const row = { "決算期": parsed.period };
+    CF_COLS.slice(1).forEach((col, i) => { row[col] = parsed.nums[i] !== undefined ? parsed.nums[i] : ""; });
     rows.push(row);
   }
   return rows;
@@ -115,25 +282,96 @@ function readBody(req) {
   });
 }
 
-async function apiManual(req, res) {
-  const body = JSON.parse(await readBody(req) || "{}");
-  const code = safeCode(String(body.code || "").trim());
-  if (!code) return sendJson(res, 400, { error: "銘柄コードが不正です（英数字1〜6桁）" });
-  const rows = parsePastedFinancials(String(body.text || ""));
-  if (!rows.length) return sendJson(res, 400, { error: "業績データ行が見つかりません（「2025/03 253,136 ...」のような決算期で始まる行が必要です）" });
+// 決算期の照合キー: 会計基準サフィックス(「2024/03 I」「2007/03 S」等)を無視して年月で照合する
+function periodKey(p) {
+  const m = String(p).match(/^\d{4}\/\d{1,2}/);
+  return m ? m[0] : String(p);
+}
 
-  const file = path.join(DATA_DIR, "output", `${code}_financials.csv`);
-  const existing = csvToObjects(file) || [];
-  const byPeriod = new Map(existing.map(r => [r["決算期"], r]));
+function mergeCsvByPeriod(file, cols, rows) {
+  // 既存行は削除・統合しない（会計基準移行年はS/I両方の行が正当に存在するため、
+  // 年月キーで既存行同士をまとめてはならない）。貼付行は同じ年月の既存行があれば
+  // その「最後の」行（＝最新会計基準の行）の値のみ更新し、無ければ追加する。
+  const merged = (csvToObjects(file) || []).slice();
   let added = 0, updated = 0;
   for (const r of rows) {
-    if (byPeriod.has(r["決算期"])) updated++; else added++;
-    byPeriod.set(r["決算期"], r);
+    const key = periodKey(r["決算期"]);
+    let idx = -1;
+    for (let i = 0; i < merged.length; i++) {
+      if (periodKey(merged[i]["決算期"]) === key) idx = i;
+    }
+    if (idx >= 0) {
+      updated++;
+      merged[idx] = { ...r, "決算期": merged[idx]["決算期"] }; // ラベル(サフィックス)は既存を維持
+    } else {
+      added++;
+      merged.push(r);
+    }
   }
-  const merged = [...byPeriod.values()].sort((a, b) => String(a["決算期"]).localeCompare(String(b["決算期"])));
-  fs.writeFileSync(file, toCsv(FIN_COLS, merged), "utf8");
+  merged.sort((a, b) => periodKey(a["決算期"]).localeCompare(periodKey(b["決算期"])) ||
+    String(a["決算期"]).localeCompare(String(b["決算期"])));
+  fs.writeFileSync(file, toCsv(cols, merged), "utf8");
+  return { added, updated, total: merged.length };
+}
 
-  const name = String(body.name || "").trim();
+async function apiManual(req, res) {
+  const body = JSON.parse(await readBody(req) || "{}");
+  const text = String(body.text || "");
+  const lines = text.split(/\r?\n/);
+  const cn = extractCodeName(lines);
+  if (!cn || !safeCode(cn.code)) {
+    return sendJson(res, 400, { error: "銘柄コードをテキストから検出できませんでした。ページ先頭の「7826 フルヤ金属」のような行を含めて貼り付けてください。" });
+  }
+  const { code, name } = cn;
+  const rows = parsePastedFinancials(text);
+  if (!rows.length) return sendJson(res, 400, { error: `業績データ行が見つかりません（${code}）。通期業績推移の表を含めて貼り付けてください。` });
+
+  const fin = mergeCsvByPeriod(path.join(DATA_DIR, "output", `${code}_financials.csv`), FIN_COLS, rows);
+
+  const extDir = path.join(DATA_DIR, "output_extended");
+  if (!fs.existsSync(extDir)) fs.mkdirSync(extDir, { recursive: true });
+
+  let cf = null;
+  const cfRows = parsePastedCashflow(text);
+  if (cfRows.length) {
+    cf = mergeCsvByPeriod(path.join(extDir, `${code}_cashflow.csv`), CF_COLS, cfRows);
+  }
+
+  // 指標（ROE/ROIC/PER/PBR等）→ {code}_latest_indicators.csv（既存値は貼付に無い項目のみ維持）
+  const ind = parsePastedIndicators(text);
+  let indSaved = 0;
+  if (Object.keys(ind).length) {
+    const indFile = path.join(extDir, `${code}_latest_indicators.csv`);
+    const prev = (csvToObjects(indFile) || [])[0] || {};
+    const row = {};
+    for (const col of IND_COLS) row[col] = ind[col] !== undefined ? ind[col] : (prev[col] || "");
+    row.data_as_of = new Date().toISOString().slice(0, 19).replace("T", " ");
+    fs.writeFileSync(indFile, toCsv(IND_COLS, [row]), "utf8");
+    indSaved = Object.keys(ind).length;
+  }
+
+  // EPS会社予想 → {code}_eps_forecast.csv
+  const epsRows = parsePastedEpsForecast(text);
+  if (epsRows.length) {
+    fs.writeFileSync(path.join(extDir, `${code}_eps_forecast.csv`), toCsv(["決算期", "EPS予想", "区分"], epsRows), "utf8");
+  }
+
+  // 成長率・レーティング等 → manual_fundamentals.csv（ビューア専用・codeでマージ）
+  const extras = parsePastedExtras(text);
+  let extrasSaved = 0;
+  if (Object.keys(extras).length) {
+    const mfFile = path.join(DATA_DIR, "manual_fundamentals.csv");
+    const rows = csvToObjects(mfFile) || [];
+    const m = new Map(rows.map(r => [r.code, r]));
+    const prev = m.get(code) || {};
+    const row = { code };
+    for (const col of MF_COLS.slice(1)) row[col] = extras[col] !== undefined ? extras[col] : (prev[col] || "");
+    row.updated_at = new Date().toISOString().slice(0, 19).replace("T", " ");
+    m.set(code, row);
+    fs.writeFileSync(mfFile, toCsv(MF_COLS, [...m.values()]), "utf8");
+    extrasSaved = Object.keys(extras).length;
+  }
+
   if (name) {
     const namesFile = path.join(DATA_DIR, "manual_names.csv");
     const names = csvToObjects(namesFile) || [];
@@ -141,7 +379,7 @@ async function apiManual(req, res) {
     m.set(code, name);
     fs.writeFileSync(namesFile, toCsv(["code", "name"], [...m.entries()].map(([c, n]) => ({ code: c, name: n }))), "utf8");
   }
-  sendJson(res, 200, { code, added, updated, total: merged.length, rows });
+  sendJson(res, 200, { code, name, fin, cf, indicators: indSaved, extras: extrasSaved, eps_forecast: epsRows.length, rows });
 }
 
 function sendJson(res, status, obj) {
@@ -168,11 +406,12 @@ function apiStocks(res) {
     for (const f of fs.readdirSync(outDir)) {
       const m = f.match(/^([0-9A-Za-z]{1,6})_financials\.csv$/);
       if (!m || known.has(m[1])) continue;
+      const ind = (csvToObjects(path.join(DATA_DIR, "output_extended", `${m[1]}_latest_indicators.csv`)) || [])[0] || null;
       list.push({
         rank: "", code: m[1], name: manualNames.get(m[1]) || "(手動追加)",
         quality_rank: "", quality_score: "", growth: "", profitability: "", financial: "",
-        data_as_of: "", fetched_at: "", manual: true,
-        fundamentals: fmap.get(m[1]) || null,
+        data_as_of: "", fetched_at: ind ? (ind.data_as_of || "") : "", manual: true,
+        fundamentals: fmap.get(m[1]) || (ind ? { roe: ind.ROE || "", equity_ratio: ind["自己資本比率"] || "" } : null),
       });
     }
   }
@@ -188,6 +427,8 @@ function apiStock(res, code) {
   const funds = csvToObjects(path.join(DATA_DIR, "fundamentals.csv")) || [];
   const scores = csvToObjects(path.join(DATA_DIR, "fundamental_scores.csv")) || [];
   const manualNames = new Map((csvToObjects(path.join(DATA_DIR, "manual_names.csv")) || []).map(r => [r.code, r.name]));
+  // 手動追加銘柄は fundamentals.csv に行が無いため manual_fundamentals.csv をフォールバックに使う
+  const manualFunds = (csvToObjects(path.join(DATA_DIR, "manual_fundamentals.csv")) || []).find(r => r.code === code) || null;
   sendJson(res, 200, {
     code,
     manual_name: manualNames.get(code) || null,
@@ -195,7 +436,7 @@ function apiStock(res, code) {
     cashflow,
     indicators: indicators && indicators[0] ? indicators[0] : null,
     eps_forecast: epsForecast || [],
-    fundamentals: funds.find(f => f.code === code) || null,
+    fundamentals: funds.find(f => f.code === code) || manualFunds,
     score: scores.find(s => s.code === code) || null,
   });
 }

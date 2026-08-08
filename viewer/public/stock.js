@@ -28,7 +28,7 @@
       ["成長性", s.growth], ["収益性", s.profitability], ["財務", s.financial],
       ["順位", `${s.rank} 位`],
     ].map(([k, v]) => `<div class="ind-cell"><span class="k">${k}</span><span class="v">${v ?? "-"}</span></div>`).join("");
-  } else sg.innerHTML = `<span class="muted">スコアなし</span>`;
+  } else sg.innerHTML = `<span class="muted">スコア対象外（手動追加銘柄 — 総合スコアは05パイプラインの自動取得60銘柄のみ算出されます）</span>`;
 
   // ---- 通期業績推移（3グラフ常時表示） ----
   const fin = d.financials || [];
