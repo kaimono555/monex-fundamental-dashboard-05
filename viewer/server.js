@@ -477,6 +477,40 @@ function parseFlashBlocks(text) {
   return blocks;
 }
 
+// raw HTML内の非表示詳細テーブルをセクション単位で汎用抽出する
+// （貸借対照表・設備投資等はテキスト版にグラフ凡例しか無く、実数値はHTML内の隠しテーブルにある）
+const HTML_TABLE_SECTIONS = [
+  "貸借対照表", "設備投資・減価償却費・研究開発費", "有利子負債", "各種回転率", "従業員数・1人当り業績",
+];
+function extractSectionTables(code) {
+  const file = path.join(DATA_DIR, "raw", `${code}.html`);
+  if (!fs.existsSync(file)) return {};
+  let html;
+  try { html = fs.readFileSync(file, "utf8"); } catch { return {}; }
+  // セクション見出し(h2)の位置で判定する（本文中の同語、例: 銘柄カルテ内の「有利子負債率」に誤マッチしないように）
+  const findHeading = name => {
+    const i = html.indexOf(`${name}</h2>`);
+    return i !== -1 ? i : -1;
+  };
+  const marks = HTML_TABLE_SECTIONS
+    .map(name => ({ name, idx: findHeading(name) }))
+    .filter(m => m.idx !== -1)
+    .sort((a, b) => a.idx - b.idx);
+  const endIdx = findHeading("指標一覧");
+  const out = {};
+  marks.forEach((m, i) => {
+    const to = i + 1 < marks.length ? marks[i + 1].idx : (endIdx !== -1 ? endIdx : m.idx + 400000);
+    const seg = html.slice(m.idx, to);
+    const tables = (seg.match(/<table[\s\S]*?<\/table>/g) || []).map(t => {
+      const rows = (t.match(/<tr[\s\S]*?<\/tr>/g) || []).map(tr =>
+        (tr.match(/<t[dh][^>]*>[\s\S]*?<\/t[dh]>/g) || []).map(c => stripTags(c).replace(/[▲△]/g, "").trim()));
+      return rows.filter(r => r.length);
+    }).filter(rows => rows.length >= 2);
+    if (tables.length) out[m.name] = tables;
+  });
+  return out;
+}
+
 // raw履歴（自動取得時点）に貼付蓄積分（決算発表後）を重ねて返す
 function combinedQuarterly(code, sectionKey, csvName) {
   const raw = parseRawQuarterly(code,
@@ -824,6 +858,12 @@ const server = http.createServer((req, res) => {
       return apiManual(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
     }
     if (u.pathname === "/api/stocks") return apiStocks(res);
+    const ms = u.pathname.match(/^\/api\/source\/([^/]+)$/);
+    if (ms) {
+      const code = safeCode(ms[1]);
+      if (!code) return sendJson(res, 400, { error: "invalid code" });
+      return sendJson(res, 200, { code, text: loadSourceText(code), tables: extractSectionTables(code) });
+    }
     const m = u.pathname.match(/^\/api\/stock\/([^/]+)$/);
     if (m) {
       const code = safeCode(m[1]);

@@ -307,6 +307,90 @@
     ["EPS予想", epsF ? `${epsF["EPS予想"]} 円 (${epsF["決算期"]})` : "-"],
   ].map(([k, v]) => `<div class="ind-cell"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
 
+  // ---- マネックス取得データ（全文）: 開いたときだけ読み込み、タブ区切り行は表に整形 ----
+  (function setupSourceView() {
+    const btn = document.getElementById("srcToggleBtn");
+    const body = document.getElementById("srcBody");
+    let loaded = false;
+    const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    const SECTION_KWS = ["企業情報", "銘柄カルテ", "決算発表予定", "今期進捗状況", "通期業績推移", "平均成長率", "平均利益率",
+      "四半期業績推移（3か月）", "四半期業績推移（累積）", "キャッシュフロー推移", "貸借対照表",
+      "設備投資・減価償却費・研究開発費", "有利子負債", "各種回転率", "従業員数・1人当り業績", "指標一覧", "同業他社情報"];
+    function renderSource(text, sectionTables) {
+      // グラフ描画用ノイズを除去: タブ無しで数値だけの行（軸目盛）と、直前と同一の行（凡例の重複）
+      const rawLines = text.split(/\r?\n/);
+      const lines = [];
+      let prevTrim = null;
+      for (const line of rawLines) {
+        const t = line.trim();
+        if (!line.includes("\t") && /^[-－0-9,\.]+$/.test(t) && t !== "") continue; // 軸目盛
+        if (t !== "" && t === prevTrim) continue; // 連続重複
+        lines.push(line);
+        prevTrim = t;
+      }
+      const out = [];
+      let table = null;
+      const flushTable = () => {
+        if (!table) return;
+        out.push(`<div class="tbl-scroll"><table class="data"><tbody>` +
+          table.map(cells => `<tr>${cells.map(c => {
+            const t = c.trim();
+            const isNum = /^[-－]?[\d,\.]+[%円倍株人回期]?$/.test(t);
+            const neg = /^-|^▲/.test(t);
+            return `<td class="${isNum ? "" : "l "}${neg ? "neg" : ""}">${esc(t) || "&nbsp;"}</td>`;
+          }).join("")}</tr>`).join("") + `</tbody></table></div>`);
+        table = null;
+      };
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) { flushTable(); continue; }
+        if (line.includes("\t")) {
+          (table = table || []).push(line.split("\t"));
+          continue;
+        }
+        flushTable();
+        if (SECTION_KWS.some(k => t === k || t.startsWith(k))) {
+          out.push(`<h3 class="chart-title">${esc(t)}</h3>`);
+          // raw HTMLの非表示詳細テーブルがあるセクションは、実数値の表をここに挿入する
+          const sec = Object.keys(sectionTables).find(k => t === k || t.startsWith(k));
+          if (sec && sectionTables[sec]) {
+            for (const rows of sectionTables[sec]) {
+              out.push(`<div class="tbl-scroll"><table class="data"><tbody>` +
+                rows.map((cells, ri) => `<tr>${cells.map(c => {
+                  const isNum = /^[-－]?[\d,\.]+[%円倍株人回期]?$/.test(c);
+                  const neg = /^-/.test(c);
+                  const tag = ri === 0 ? "th" : "td";
+                  return `<${tag} class="${isNum ? "" : "l "}${neg ? "neg" : ""}">${esc(c) || "&nbsp;"}</${tag}>`;
+                }).join("")}</tr>`).join("") + `</tbody></table></div>`);
+            }
+            delete sectionTables[sec]; // 同名セクションの二重挿入防止
+          }
+        } else {
+          out.push(`<p style="margin:4px 0; font-size:12px">${esc(t)}</p>`);
+        }
+      }
+      flushTable();
+      body.innerHTML = out.join("");
+    }
+    btn.addEventListener("click", async () => {
+      if (!loaded) {
+        btn.textContent = "読み込み中...";
+        try {
+          const res = await fetch(`/api/source/${encodeURIComponent(code)}`);
+          const s = await res.json();
+          if (s.text) renderSource(s.text, s.tables || {});
+          else body.innerHTML = `<span class="muted">元テキストがありません（raw未取得・貼付未実施の銘柄）</span>`;
+          loaded = true;
+        } catch (e) {
+          body.innerHTML = `<span class="muted">読み込みに失敗しました: ${e}</span>`;
+        }
+      }
+      const open = body.style.display === "none";
+      body.style.display = open ? "" : "none";
+      btn.textContent = open ? "▲ 全文を閉じる" : "▼ 全文を表示";
+    });
+  })();
+
   // ---- 共通: テーブル生成 ----
   function tableHtml(cols, rows) {
     if (!rows.length) return `<span class="muted">データなし</span>`;
