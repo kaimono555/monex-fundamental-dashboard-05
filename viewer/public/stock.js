@@ -316,60 +316,202 @@
     const SECTION_KWS = ["企業情報", "銘柄カルテ", "決算発表予定", "今期進捗状況", "通期業績推移", "平均成長率", "平均利益率",
       "四半期業績推移（3か月）", "四半期業績推移（累積）", "キャッシュフロー推移", "貸借対照表",
       "設備投資・減価償却費・研究開発費", "有利子負債", "各種回転率", "従業員数・1人当り業績", "指標一覧", "同業他社情報"];
+    // マネックス画面風の整形表示: ノイズ除去 + 分割された行の結合 + ヘッダ再構成
+    const DROP_EXACT = new Set([
+      "株価を見る", "四季報を見る", "詳細チャートを見る", "詳細を見る", "詳細：", "[20分ディレイ株価]",
+      "企業分析", "チャート", "セグメント・海外", "業績予想修正", "配当・株主還元", "アナリスト予想",
+      "株価指標", "理論株価", "業績ニュース", "適時開示",
+      "業績", "前期比", "前年比", "指数", "利益率", "変動要因", "5期", "10期", "全期間",
+      "実績推移", "対売上高比率", "実績", "対総資産比率", "対自己資本比率",
+      "直近比較", "項目別推移", "時系列推移", "簡易表示", "詳細表示",
+      "前期", "今期", "前期会社実績", "今期会社実績", "最新会社予想", "コンセンサス予想",
+      "売上高(右軸)", "従業員数", "▲", "▼",
+    ]);
+    const DROP_RE = [
+      /^[-－0-9,.\/ ]+$/,             // 軸目盛・年月 等（%は継続行の可能性があるため含めない）
+      /^[-－\d,.]+ %$/,               // ゲージ目盛 "0 %" "100 %" 等（%前に空白）
+      /^[-－\d,.]+[MKB万]$/,          // "80M" 等
+      /^[-－\d,.]+(人|回|円|株|倍)$/,  // 単位付き軸目盛（%は継続行の可能性があるため含めない）
+      /^\d{4}\/\d{2}(本|予)?$/,       // グラフ横軸の決算期ラベル
+      /^(1Q|2Q|3Q|4Q|通期|本決算)$/,
+      /^(売上高|営業利益|経常利益|当期利益)\s*進捗率$/,
+      /^表示形式/, /^表示：/, /^[　]/,
+    ];
+    // 貸借対照表はヘッダ行がテキスト化で崩れるため、既知の列構成を使う
+    const BS_HDRS = [
+      { cap: "資産", cols: ["決算期", "資産", "流動資産", "現金預金", "売上債権", "有価証券", "棚卸資産", "その他流動資産", "固定資産", "有形固定資産", "無形固定資産", "投資その他の資産", "その他資産"] },
+      { cap: "負債・純資産", cols: ["決算期", "負債", "流動負債", "買入債務", "その他流動負債", "固定負債", "その他負債", "純資産", "自己資本", "新株予約権等", "非支配株主持分", "その他純資産", "その他"] },
+    ];
     function renderSource(text, sectionTables) {
-      // グラフ描画用ノイズを除去: タブ無しで数値だけの行（軸目盛）と、直前と同一の行（凡例の重複）
-      const rawLines = text.split(/\r?\n/);
+      const all = text.split(/\r?\n/).map(l => l.replace(/​/g, ""));
+      // 表示範囲: 銘柄コード行〜フッタ手前
+      let s = 0, e = all.length;
+      for (let i = 0; i < Math.min(all.length, 60); i++)
+        if (/^[0-9][0-9A-Z]{3}\s+\S/.test(all[i].trim())) { s = i; break; }
+      for (let i = s; i < all.length; i++)
+        if (/^(保有銘柄・配当情報|お気に入り銘柄|メモ銘柄一覧|最近閲覧した銘柄|東証33業種選択|ページトップへ)/.test(all[i].trim())) { e = i; break; }
+      // ノイズ除去: グラフ用の凡例・軸目盛・ナビ・「(単位…)〜表示：」区間
       const lines = [];
-      let prevTrim = null;
-      for (const line of rawLines) {
-        const t = line.trim();
-        if (!line.includes("\t") && /^[-－0-9,\.]+$/.test(t) && t !== "") continue; // 軸目盛
-        if (t !== "" && t === prevTrim) continue; // 連続重複
+      let prevTrim = null, inChart = false, chartN = 0;
+      for (let i = s; i < e; i++) {
+        const line = all[i], t = line.trim();
+        if (inChart) {
+          if (/^表示：/.test(t)) { inChart = false; continue; }
+          if (++chartN > 60) inChart = false; // 保険: 区間が閉じない場合は打ち切り
+          else continue;
+        }
+        if (/^[(（]単位/.test(t)) { inChart = true; chartN = 0; continue; }
+        if (!line.includes("\t")) {
+          if (t !== "" && t === prevTrim) { prevTrim = t; continue; } // 連続重複（グラフ凡例）
+          prevTrim = t;
+        } else prevTrim = null;
+        if (!line.includes("\t")) {
+          if (DROP_EXACT.has(t)) continue;
+          if (t !== "" && DROP_RE.some(r => r.test(t))) continue;
+        } else if (line.split("\t").every(c => c.trim() === "")) continue;
         lines.push(line);
-        prevTrim = t;
       }
+      // 整形: タブ行=表の行 / 「(予)」「24.6%」等の継続行は直前セルに結合 / ラベル連続はヘッダ・見出しに
       const out = [];
-      let table = null;
+      let table = null;    // { rows: [{cells,hg?,th?}|{cap,text}] }
+      let pending = null;  // 組み立て中の行（セル配列）
+      let pendingHg = false;
+      let buffer = [];     // タブ無しラベルの連続（列ヘッダ or 小見出し候補）
+      let headGrid = false, bsMode = false, bsCount = 0;
+      const isNumCell = c => c.split("\n").every(sg =>
+        sg === "" || sg === "--" || /^[-－(（]?[\d,.\/%円倍株人回期)）\-－]+$/.test(sg));
+      const negCls = c => /(^|\n)[-－▲]\d/.test(c) ? "neg" : "";
+      const fmtCell = c => (esc(c) || "&nbsp;").replace(/\n/g, "<br>");
+      const pushPending = () => {
+        if (pending) { (table = table || { rows: [] }).rows.push({ cells: pending, hg: pendingHg }); pending = null; }
+      };
       const flushTable = () => {
+        pushPending();
         if (!table) return;
-        out.push(`<div class="tbl-scroll"><table class="data"><tbody>` +
-          table.map(cells => `<tr>${cells.map(c => {
-            const t = c.trim();
-            const isNum = /^[-－]?[\d,\.]+[%円倍株人回期]?$/.test(t);
-            const neg = /^-|^▲/.test(t);
-            return `<td class="${isNum ? "" : "l "}${neg ? "neg" : ""}">${esc(t) || "&nbsp;"}</td>`;
-          }).join("")}</tr>`).join("") + `</tbody></table></div>`);
+        const maxCols = Math.max(...table.rows.map(r => r.cap ? 1 : r.cells.length));
+        out.push(`<div class="tbl-scroll"><table class="data src-tbl"><tbody>` + table.rows.map(r => {
+          if (r.cap) return `<tr><th colspan="${maxCols}" class="l cap">${fmtCell(r.text)}</th></tr>`;
+          if (r.hg) return `<tr>${r.cells.map((c, i) => i % 2 === 0
+            ? `<th class="l">${fmtCell(c)}</th>`
+            : `<td class="${negCls(c)}">${fmtCell(c)}</td>`).join("")}</tr>`;
+          const isTh = r.th || (r.cells.filter(c => c !== "").length >= 3 &&
+            r.cells.every(c => c === "" || (!isNumCell(c) && c.length <= 14)));
+          return `<tr>${r.cells.map(c => {
+            if (isTh) return `<th>${fmtCell(c)}</th>`;
+            const num = isNumCell(c) && c !== "";
+            const wrap = c.length > 30 ? "wrap " : "";
+            return `<td class="${num ? "" : "l "}${wrap}${negCls(c)}">${fmtCell(c)}</td>`;
+          }).join("")}</tr>`;
+        }).join("") + `</tbody></table></div>`);
         table = null;
+      };
+      const flushBuffer = () => {
+        buffer.forEach(b => out.push(`<p class="${/^現在値/.test(b) ? "src-price" : "src-line"}">${esc(b)}</p>`));
+        buffer = [];
+      };
+      const lastCells = () => {
+        if (pending) return pending;
+        if (table && table.rows.length) { const r = table.rows[table.rows.length - 1]; if (!r.cap) return r.cells; }
+        return null;
+      };
+      const appendLast = t => {
+        const c = lastCells(); if (!c) return false;
+        c[c.length - 1] = c[c.length - 1] ? c[c.length - 1] + "\n" + t : t;
+        return true;
+      };
+      const startTableWithBuffer = firstCells => {
+        table = { rows: [] };
+        if (bsMode) {
+          const h = BS_HDRS[bsCount++];
+          if (h) {
+            table.rows.push({ cap: true, text: h.cap });
+            if (firstCells.length === h.cols.length) table.rows.push({ cells: h.cols, th: true });
+          }
+        } else if (buffer.length >= 3 && buffer.length === firstCells.length) {
+          table.rows.push({ cells: buffer, th: true });
+        } else if (buffer.length) {
+          // 列数不一致の複数ラベルはグラフタブ名等の残骸が多いため、直近のラベルのみ採用
+          table.rows.push({ cap: true, text: buffer[buffer.length - 1] });
+        }
+        buffer = [];
+      };
+      const emitSection = t => {
+        out.push(`<h3 class="chart-title">${esc(t)}</h3>`);
+        const sec = Object.keys(sectionTables).find(k => t === k || t.startsWith(k));
+        if (sec && sectionTables[sec]) {
+          for (const rows of sectionTables[sec]) {
+            out.push(`<div class="tbl-scroll"><table class="data"><tbody>` +
+              rows.map((cells, ri) => `<tr>${cells.map(c => {
+                const isNum = /^[-－]?[\d,\.]+[%円倍株人回期]?$/.test(c);
+                const neg = /^-/.test(c);
+                const tag = ri === 0 ? "th" : "td";
+                return `<${tag} class="${isNum ? "" : "l "}${neg ? "neg" : ""}">${esc(c) || "&nbsp;"}</${tag}>`;
+              }).join("")}</tr>`).join("") + `</tbody></table></div>`);
+          }
+          delete sectionTables[sec]; // 同名セクションの二重挿入防止
+        }
       };
       for (const line of lines) {
         const t = line.trim();
-        if (!t) { flushTable(); continue; }
-        if (line.includes("\t")) {
-          (table = table || []).push(line.split("\t"));
+        if (!t) continue;
+        const hasTab = line.includes("\t");
+        if (!hasTab && SECTION_KWS.some(k => t === k || t.startsWith(k))) {
+          flushTable(); flushBuffer(); headGrid = false;
+          bsMode = t.startsWith("貸借対照表"); if (bsMode) bsCount = 0;
+          emitSection(t);
           continue;
         }
-        flushTable();
-        if (SECTION_KWS.some(k => t === k || t.startsWith(k))) {
-          out.push(`<h3 class="chart-title">${esc(t)}</h3>`);
-          // raw HTMLの非表示詳細テーブルがあるセクションは、実数値の表をここに挿入する
-          const sec = Object.keys(sectionTables).find(k => t === k || t.startsWith(k));
-          if (sec && sectionTables[sec]) {
-            for (const rows of sectionTables[sec]) {
-              out.push(`<div class="tbl-scroll"><table class="data"><tbody>` +
-                rows.map((cells, ri) => `<tr>${cells.map(c => {
-                  const isNum = /^[-－]?[\d,\.]+[%円倍株人回期]?$/.test(c);
-                  const neg = /^-/.test(c);
-                  const tag = ri === 0 ? "th" : "td";
-                  return `<${tag} class="${isNum ? "" : "l "}${neg ? "neg" : ""}">${esc(c) || "&nbsp;"}</${tag}>`;
-                }).join("")}</tr>`).join("") + `</tbody></table></div>`);
-            }
-            delete sectionTables[sec]; // 同名セクションの二重挿入防止
-          }
-        } else {
-          out.push(`<p style="margin:4px 0; font-size:12px">${esc(t)}</p>`);
+        if (!hasTab && t.startsWith("売買単位")) {
+          flushTable(); flushBuffer();
+          out.push(`<p class="src-line">${esc(t)}</p>`);
+          headGrid = true; continue;
         }
+        if (!hasTab && /^(※|財務データ等)/.test(t)) {
+          flushTable(); flushBuffer();
+          if (/^財務データ等/.test(t)) headGrid = false;
+          out.push(`<p class="src-note">${esc(t)}</p>`);
+          continue;
+        }
+        if (bsMode && !hasTab) { flushTable(); continue; } // 貸借対照表の崩れたヘッダ断片は捨てる
+        if (hasTab) {
+          const cells = line.split("\t").map(c => c.trim());
+          const cont = (line.startsWith("\t") || /^[(（]/.test(cells[0]) || /%$/.test(cells[0]));
+          if (cont && lastCells()) {
+            if (!pending && table) {
+              const last = table.rows[table.rows.length - 1];
+              if (!last.cap && !last.th && !last.hg) { table.rows.pop(); pending = last.cells; pendingHg = false; }
+            }
+            if (pending) {
+              const [first, ...rest] = cells;
+              if (first !== "") pending[pending.length - 1] = pending[pending.length - 1] ? pending[pending.length - 1] + "\n" + first : first;
+              pending.push(...rest);
+              continue;
+            }
+          }
+          const isHdrRow = cells.filter(c => c !== "").length >= 3 &&
+            cells.every(c => c === "" || (!isNumCell(c) && c.length <= 14));
+          if (!table && !pending) { startTableWithBuffer(cells); }
+          else if (isHdrRow) { flushTable(); startTableWithBuffer(cells); }
+          else pushPending();
+          pending = cells; pendingHg = headGrid;
+          continue;
+        }
+        // タブ無し行
+        if (/^[(（]/.test(t) || /^--/.test(t) || /%$/.test(t)) {
+          if (appendLast(t)) continue;
+          if (buffer.length) { buffer.push(t); continue; }
+          out.push(`<p class="src-line">${esc(t)}</p>`); continue;
+        }
+        if (/^[・･]/.test(t) && appendLast(t)) continue;
+        if (t.length > 40) {
+          if (pending && pending[pending.length - 1] === "") { pending[pending.length - 1] = t; continue; }
+          flushTable(); flushBuffer();
+          out.push(`<p class="src-line">${esc(t)}</p>`); continue;
+        }
+        if (headGrid) { pushPending(); pending = [t]; pendingHg = true; continue; }
+        flushTable(); buffer.push(t);
       }
-      flushTable();
+      flushTable(); flushBuffer();
       body.innerHTML = out.join("");
     }
     btn.addEventListener("click", async () => {
