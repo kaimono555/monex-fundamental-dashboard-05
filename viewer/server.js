@@ -428,6 +428,55 @@ function parseRawQuarterly(code, startKw, endKw) {
   return rows;
 }
 
+// 銘柄の元テキスト: 手動貼付全文(manual_raw)と自動取得(raw)の新しい方を返す
+function loadSourceText(code) {
+  const cands = [
+    path.join(DATA_DIR, "manual_raw", `${code}.txt`),
+    path.join(DATA_DIR, "raw", `${code}.txt`),
+  ].filter(p => fs.existsSync(p));
+  if (!cands.length) return "";
+  cands.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  try { return fs.readFileSync(cands[0], "utf8"); } catch { return ""; }
+}
+
+// 「決算発表予定」: 直近決算の発表内容と対会社予想進捗率の文を抽出
+function parseAnnounce(text) {
+  const recent = text.match(/直近の決算は[^\r\n]+/);
+  const progress = text.match(/対会社予想進捗率：[^\r\n]+/);
+  if (!recent && !progress) return null;
+  return { recent: recent ? recent[0].trim() : "", progress: progress ? progress[0].trim() : "" };
+}
+
+// 「速報値(日付発表)」ブロック: 見出し日付と直後のデータ行（New/予ラベル・前期比%込み）を抽出。
+// 通期/四半期(3か月)/四半期(累積)のどのセクションに属すかも位置関係から判定する
+function parseFlashBlocks(text) {
+  const lines = text.split(/\r?\n/);
+  const secIdx = (kw) => lines.findIndex(l => l.includes(kw));
+  const iAnnual = secIdx("通期業績推移");
+  const iQ3 = lines.findIndex(l => l.includes("四半期業績推移（3か月）") || l.includes("四半期業績推移(3か月)"));
+  const iQc = lines.findIndex(l => l.includes("四半期業績推移（累積）") || l.includes("四半期業績推移(累積)"));
+  const iCf = secIdx("キャッシュフロー推移");
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/速報値\s*[（(]([^（）()]*発表)[）)]/);
+    if (!m) continue;
+    const rows = [];
+    for (let j = i + 1; j < Math.min(lines.length, i + 10); j++) {
+      const t = lines[j].trim();
+      if (/^\d{4}\/\d{1,2}/.test(t)) {
+        rows.push(lines[j].split("\t").map(c => c.trim()).filter(Boolean));
+      } else if (rows.length) break;
+    }
+    if (!rows.length) continue;
+    let section = "annual";
+    if (iQc !== -1 && i > iQc && (iCf === -1 || i < iCf)) section = "qcum";
+    else if (iQ3 !== -1 && i > iQ3) section = "q3";
+    else if (iAnnual !== -1 && i > iAnnual) section = "annual";
+    blocks.push({ section, date: m[1], rows });
+  }
+  return blocks;
+}
+
 // raw履歴（自動取得時点）に貼付蓄積分（決算発表後）を重ねて返す
 function combinedQuarterly(code, sectionKey, csvName) {
   const raw = parseRawQuarterly(code,
@@ -509,6 +558,11 @@ async function apiManual(req, res) {
   if (!rows.length) return sendJson(res, 400, { error: `業績データ行が見つかりません（${code}）。通期業績推移の表を含めて貼り付けてください。` });
 
   const fin = mergeCsvByPeriod(path.join(DATA_DIR, "output", `${code}_financials.csv`), FIN_COLS, rows);
+
+  // 貼付全文を保存（速報値・決算発表予定など、CSV化しない情報の表示時抽出に使う）
+  const manualRawDir = path.join(DATA_DIR, "manual_raw");
+  if (!fs.existsSync(manualRawDir)) fs.mkdirSync(manualRawDir, { recursive: true });
+  fs.writeFileSync(path.join(manualRawDir, `${code}.txt`), text, "utf8");
 
   const extDir = path.join(DATA_DIR, "output_extended");
   if (!fs.existsSync(extDir)) fs.mkdirSync(extDir, { recursive: true });
@@ -654,14 +708,14 @@ function apiStock(res, code) {
   const cashflow = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_cashflow.csv`));
   const quarterly = combinedQuarterly(code, "3か月", "quarterly");
   const quarterlyCum = combinedQuarterly(code, "累積", "quarterly_cum");
-  // 会社予想: 貼付保存分があればそれを優先。無ければ raw テキスト（自動取得時点）から抽出
+  // 会社予想: 貼付保存分があればそれを優先。無ければ元テキスト（貼付全文 or raw）から抽出
+  const sourceText = loadSourceText(code);
   let forecast = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_forecast.csv`)) || [];
-  if (!forecast.length) {
-    const rawTxt = path.join(DATA_DIR, "raw", `${code}.txt`);
-    if (fs.existsSync(rawTxt)) {
-      try { forecast = parsePastedEpsForecast(fs.readFileSync(rawTxt, "utf8")).full; } catch { forecast = []; }
-    }
+  if (!forecast.length && sourceText) {
+    try { forecast = parsePastedEpsForecast(sourceText).full; } catch { forecast = []; }
   }
+  const announce = sourceText ? parseAnnounce(sourceText) : null;
+  const flash = sourceText ? parseFlashBlocks(sourceText) : [];
   const indicators = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_latest_indicators.csv`));
   const epsForecast = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_eps_forecast.csv`));
   const funds = csvToObjects(path.join(DATA_DIR, "fundamentals.csv")) || [];
@@ -701,6 +755,8 @@ function apiStock(res, code) {
     quarterly: quarterly || [],
     quarterly_cum: quarterlyCum || [],
     forecast,
+    announce,
+    flash,
     indicators: indicators && indicators[0] ? indicators[0] : null,
     eps_forecast: epsForecast || [],
     fundamentals,

@@ -34,6 +34,7 @@ data/target_codes.csv
 # ローカルビューア（viewer/）の手動貼付で生成されるファイル
 data/manual_names.csv
 data/manual_fundamentals.csv
+data/manual_raw/
 
 # スクリプト生成ファイル（ルート）
 growth_metrics.csv

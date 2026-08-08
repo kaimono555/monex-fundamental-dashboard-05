@@ -80,9 +80,82 @@
     },
   });
 
-  // ---- 通期業績テーブル（会社予想行は「予」付き決算期のまま末尾に表示） ----
-  const finCols = ["決算期", "売上高", "営業利益", "経常利益", "当期利益", "EPS", "BPS"];
-  document.getElementById("finTable").innerHTML = tableHtml(finCols, finAll);
+  // ---- 通期業績テーブル（本家同様に前期比%列付き。会社予想行は「予」付きで末尾に表示） ----
+  (function renderFinTable() {
+    if (!finAll.length) { document.getElementById("finTable").innerHTML = `<span class="muted">データなし</span>`; return; }
+    const pctCols = ["売上高", "営業利益", "経常利益", "当期利益"];
+    // 本家スカウターと同じ「|前期|を分母」方式（赤字→黒字の213.5%等も一致する）
+    const pct = (cur, prev) => {
+      const c = num(cur), p = num(prev);
+      if (c == null || p == null || isNaN(c) || isNaN(p) || p === 0) return "";
+      return (((c - p) / Math.abs(p)) * 100).toFixed(1) + "%";
+    };
+    const head = "<tr><th>決算期</th>" +
+      pctCols.map(c => `<th>${c}</th><th class="pct">(前期比)</th>`).join("") +
+      "<th>EPS</th><th>BPS</th></tr>";
+    const body = finAll.map((r, i) => {
+      const prev = i > 0 ? finAll[i - 1] : null;
+      let cells = `<td>${r["決算期"]}</td>`;
+      for (const c of pctCols) {
+        const n = num(r[c]);
+        cells += `<td class="${n != null && n < 0 ? "neg" : ""}">${fmt(r[c])}</td>`;
+        const pv = prev ? pct(r[c], prev[c]) : "";
+        cells += `<td class="pct ${pv.startsWith("-") ? "neg" : ""}">${pv || "-"}</td>`;
+      }
+      const yen = v => { const n = num(v); return (n == null || isNaN(n)) ? "－円" : `${fmt(v)}円`; };
+      cells += `<td class="${num(r["EPS"]) < 0 ? "neg" : ""}">${yen(r["EPS"])}</td>`;
+      cells += `<td>${yen(r["BPS"])}</td>`;
+      return `<tr>${cells}</tr>`;
+    }).join("");
+    document.getElementById("finTable").innerHTML =
+      `<table class="data"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  })();
+
+  // ---- 決算発表予定 ----
+  if (d.announce) {
+    document.getElementById("announcePanel").style.display = "";
+    const boldNum = s => s.replace(/([0-9,\.]+)(百万円|%)/g, "<b>$1$2</b>");
+    document.getElementById("announceBody").innerHTML =
+      (d.announce.recent ? `<p>${boldNum(d.announce.recent)}</p>` : "") +
+      (d.announce.progress ? `<p>${boldNum(d.announce.progress)}</p>` : "");
+  }
+
+  // ---- 速報値（New行・前期比%込み）: 通期／四半期(3か月)／四半期(累積) ----
+  function renderFlash(containerId, block) {
+    const el = document.getElementById(containerId);
+    if (!el || !block) return;
+    const isNegPct = s => /^-/.test(s);
+    const rowsHtml = block.rows.map(cells => {
+      let label = cells[0];
+      let rest = cells.slice(1);
+      const kubun = rest.length && /^(本|中|[1-4]Q)$/.test(rest[0]) ? rest.shift() : "";
+      label = label
+        .replace(/New/, `<span class="flash-new">New</span>`)
+        .replace(/予/, `<span class="flash-new">予</span>`);
+      let tds = `<td class="l">${label}</td>`;
+      if (block.hasKubun) tds += `<td>${kubun || "-"}</td>`;
+      for (const c of rest) {
+        const isPct = c.includes("%");
+        const neg = /-/.test(c);
+        tds += `<td class="${isPct ? "pct" : ""} ${neg ? "neg" : ""}">${c}</td>`;
+      }
+      return `<tr>${tds}</tr>`;
+    }).join("");
+    const heads = ["決算期"];
+    if (block.hasKubun) heads.push("区分");
+    heads.push("売上高", "(前期比)", "営業利益", "(前期比)", "経常利益", "(前期比)", "当期利益", "(前期比)");
+    el.innerHTML =
+      `<div class="flash-title">速報値（${block.date}）</div>` +
+      `<div class="tbl-scroll"><table class="data"><thead><tr>${heads.map((h, i) =>
+        `<th class="${h === "(前期比)" ? "pct" : ""}${i === 0 ? " l" : ""}">${h}</th>`).join("")}</tr></thead>` +
+      `<tbody>${rowsHtml}</tbody></table></div>`;
+  }
+  for (const block of (d.flash || [])) {
+    block.hasKubun = block.rows.some(cells => cells.some(c => /^(本|中|[1-4]Q)$/.test(c)));
+    if (block.section === "annual") renderFlash("flashAnnual", block);
+    else if (block.section === "q3") renderFlash("flashQ3", block);
+    else if (block.section === "qcum") renderFlash("flashQcum", block);
+  }
 
   // ---- 四半期業績推移（3か月・累積）: データがある場合のみ表示 ----
   // 年度（区分「本」で区切る）ごとに交互グレー帯を敷いて1年の区切りを分かりやすくする（本家スカウターと同様）

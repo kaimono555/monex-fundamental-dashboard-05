@@ -95,6 +95,11 @@ table.data th { background: #f4f2ec; font-weight: normal; color: var(--ink-2); }
 table.data td:first-child, table.data th:first-child { text-align: left; }
 table.data tr:nth-child(even) td { background: #fafaf7; }
 td.neg { color: var(--down); }
+table.data th.pct, table.data td.pct { color: var(--ink-3); font-size: 11px; }
+table.data td.pct.neg { color: var(--down); }
+.flash-title { font-size: 12px; font-weight: bold; margin: 14px 0 4px; }
+.flash-new { color: var(--down); font-weight: bold; margin-left: 2px; }
+table.data td.l, table.data th.l { text-align: left; }
 
 table.list { border-collapse: collapse; width: 100%; font-size: 13px; }
 table.list th, table.list td { border-bottom: 1px solid #e4e4de; padding: 6px 8px; text-align: right; }

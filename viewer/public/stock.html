@@ -20,6 +20,11 @@
     <div class="body ind-grid" id="scoreGrid"></div>
   </div>
 
+  <div class="panel" id="announcePanel" style="display:none">
+    <h2>決算発表予定</h2>
+    <div class="body" id="announceBody"></div>
+  </div>
+
   <div class="panel">
     <h2>通期業績推移</h2>
     <div class="body">
@@ -37,7 +42,10 @@
 
   <div class="panel">
     <h2>通期業績（数値）</h2>
-    <div class="body tbl-scroll" id="finTable"></div>
+    <div class="body">
+      <div class="tbl-scroll" id="finTable"></div>
+      <div id="flashAnnual"></div>
+    </div>
   </div>
 
   <div class="panel" id="qtrPanel" style="display:none">
@@ -50,6 +58,7 @@
       <div class="chart-box"><canvas id="qtrProfitChart"></canvas></div>
       <div class="chart-note">単位: 百万円</div>
       <div class="tbl-scroll" id="qtrTable" style="margin-top:12px"></div>
+      <div id="flashQ3"></div>
       <p class="muted" id="qtrNote"></p>
     </div>
   </div>
@@ -64,6 +73,7 @@
       <div class="chart-box"><canvas id="qtrCumProfitChart"></canvas></div>
       <div class="chart-note">単位: 百万円</div>
       <div class="tbl-scroll" id="qtrCumTable" style="margin-top:12px"></div>
+      <div id="flashQcum"></div>
       <p class="muted" id="qtrCumNote"></p>
     </div>
   </div>
