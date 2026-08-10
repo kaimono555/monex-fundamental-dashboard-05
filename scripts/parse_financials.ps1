@@ -7,6 +7,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# ヘッダー検証型パーサ共通関数（2026-08-09 改修: 固定列位置依存を廃止）
+. (Join-Path $PSScriptRoot "parse_financials_core.ps1")
+
 $textPath = Join-Path $RawDir "$BCode.txt"
 $htmlPath = Join-Path $RawDir "$BCode.html"
 $csvPath = Join-Path $OutputDir "$BCode`_financials.csv"
@@ -24,25 +27,6 @@ function Write-RunLog {
     Ensure-Directory $dir
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $LogPath -Value "[$timestamp] $Message" -Encoding UTF8
-}
-
-function Normalize-FinancialValue {
-    param([string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        return ""
-    }
-
-    $v = [System.Net.WebUtility]::HtmlDecode($Value).Trim()
-    $v = $v -replace [char]0x00A0, " "
-    $v = $v -replace ",", ""
-    $v = $v -replace "円|百万円|％|%", ""
-    $v = $v -replace "\s+", ""
-
-    if ($v -match "^[-－―]+$") {
-        return ""
-    }
-
-    return $v
 }
 
 function Convert-HtmlToText {
@@ -88,160 +72,13 @@ function Test-AuthenticatedFinancialText {
     }
 }
 
-function Parse-FinancialsFromText {
-    param([string]$Text)
-
-    $records = @()
-    $lines = $Text -split "\r?\n"
-
-    foreach ($line in $lines) {
-        $trimmed = $line.Trim()
-        if ($trimmed -notmatch "^\d{4}/\d{2}\b") {
-            continue
-        }
-
-        $columns = $trimmed -split "`t+"
-        if ($columns.Count -lt 10) {
-            $columns = [regex]::Split($trimmed, "\s{2,}")
-        }
-
-        if ($columns.Count -lt 9) {
-            continue
-        }
-
-        $period = $columns[0].Trim()
-        if ($period -notmatch "^\d{4}/\d{2}") {
-            continue
-        }
-
-        # 決算発表直後にページへ挿入される四半期速報値行（例: 2026/06 New 1Q 402,009 50.1% ...）は
-        # 通期業績ではないため除外する（2026-08-08 に列ズレ誤取り込みが発生）。
-        # 決算期に「New」を含む行、または2列目が四半期区分（1Q/2Q/3Q/本/中）の行は通期業績行ではない。
-        # ※「2027/03予」等の会社予想行は既存の ^\d{4}/\d{2}\b 判定で従来どおり除外される。
-        if ($period -match "New") { continue }
-        if ($columns.Count -ge 2 -and $columns[1].Trim() -match "^(本|中|[1-4]Q)$") { continue }
-
-        $sales = Normalize-FinancialValue $columns[1]
-        $operatingProfit = Normalize-FinancialValue $columns[3]
-        $ordinaryProfit = Normalize-FinancialValue $columns[5]
-        $netIncome = Normalize-FinancialValue $columns[7]
-        $eps = if ($columns.Count -ge 10) { Normalize-FinancialValue $columns[9] } else { "" }
-        $bps = if ($columns.Count -ge 11) { Normalize-FinancialValue $columns[10] } else { "" }
-
-        # 銀行・金融業は決算期によって営業利益欄が「－」（記載なし）になるため、
-        # Parse-FinancialsFromHtml と同じ規約で経常利益を代用する（行を丸ごと破棄しない）。
-        if ([string]::IsNullOrWhiteSpace($operatingProfit)) {
-            $operatingProfit = $ordinaryProfit
-        }
-
-        if ([string]::IsNullOrWhiteSpace($sales) -or [string]::IsNullOrWhiteSpace($operatingProfit) -or [string]::IsNullOrWhiteSpace($ordinaryProfit) -or [string]::IsNullOrWhiteSpace($netIncome)) {
-            continue
-        }
-
-        $records += [pscustomobject]@{
-            "決算期" = $period
-            "売上高" = $sales
-            "営業利益" = $operatingProfit
-            "経常利益" = $ordinaryProfit
-            "当期利益" = $netIncome
-            "EPS" = $eps
-            "BPS" = $bps
-        }
-    }
-
-    $unique = @{}
-    foreach ($record in $records) {
-        if (-not $unique.ContainsKey($record."決算期")) {
-            $unique[$record."決算期"] = $record
-        }
-    }
-
-    return $unique.Values | Sort-Object "決算期"
-}
-
-function Strip-HtmlCell {
-    param([string]$Html)
-    $text = [regex]::Replace($Html, "(?is)<script\b[^>]*>.*?</script>", "")
-    $text = [regex]::Replace($text, "(?is)<style\b[^>]*>.*?</style>", "")
-    $text = [regex]::Replace($text, "(?is)<[^>]+>", "")
-    $text = [System.Net.WebUtility]::HtmlDecode($text)
-    $text = $text -replace [char]0x00A0, " "
-    return ($text -replace "\s+", " ").Trim()
-}
-
-function Parse-FinancialsFromHtml {
-    param([string]$Html)
-
-    $records = @()
-    $rowMatches = [regex]::Matches($Html, "(?is)<tr\b[^>]*>.*?<td\b[^>]*class=""detail_year""[^>]*>.*?</tr>")
-    foreach ($rowMatch in $rowMatches) {
-        $rowHtml = $rowMatch.Value
-        if ($rowHtml -match "class=""detail_type""") {
-            continue
-        }
-
-        $cellMatches = [regex]::Matches($rowHtml, "(?is)<td\b([^>]*)>(.*?)</td>")
-        if ($cellMatches.Count -lt 5) {
-            continue
-        }
-
-        $period = Strip-HtmlCell $cellMatches[0].Groups[2].Value
-        if ($period -notmatch "^\d{4}/\d{2}") {
-            continue
-        }
-
-        $values = @()
-        for ($i = 1; $i -lt $cellMatches.Count; $i += 1) {
-            $attrs = $cellMatches[$i].Groups[1].Value
-            if ($attrs -notmatch "detail_num") {
-                continue
-            }
-            $values += (Normalize-FinancialValue (Strip-HtmlCell $cellMatches[$i].Groups[2].Value))
-        }
-
-        if ($values.Count -lt 4) {
-            continue
-        }
-
-        $sales = $values[0]
-        $operatingProfit = $values[1]
-        $ordinaryProfit = $values[2]
-        $netIncome = $values[3]
-
-        if ([string]::IsNullOrWhiteSpace($operatingProfit)) {
-            $operatingProfit = $ordinaryProfit
-        }
-        if ([string]::IsNullOrWhiteSpace($netIncome) -and $values.Count -ge 7) {
-            $netIncome = $values[6]
-        }
-
-        if ([string]::IsNullOrWhiteSpace($sales) -or [string]::IsNullOrWhiteSpace($ordinaryProfit) -or [string]::IsNullOrWhiteSpace($netIncome)) {
-            continue
-        }
-
-        $eps = if ($values.Count -ge 8) { $values[7] } else { "" }
-        $bps = if ($values.Count -ge 9) { $values[8] } else { "" }
-
-        $records += [pscustomobject]@{
-            "決算期" = $period
-            "売上高" = $sales
-            "営業利益" = $operatingProfit
-            "経常利益" = $ordinaryProfit
-            "当期利益" = $netIncome
-            "EPS" = $eps
-            "BPS" = $bps
-        }
-    }
-
-    $unique = @{}
-    foreach ($record in $records) {
-        if (-not $unique.ContainsKey($record."決算期")) {
-            $unique[$record."決算期"] = $record
-        }
-    }
-
-    return $unique.Values | Sort-Object "決算期"
-}
+# 2026-08-09 改修: 固定列位置(columns[1],[3],[5],[7],[9])と固定HTMLクラス位置への依存を廃止し、
+# 見出し検証型(parse_financials_core.ps1)へ移行。
+#  - テーブルの見出しを取得・検証してから、見出し名で列位置を動的に決定する。
+#  - 必須見出し欠落/重複/未知見出し/行と見出しの列数不一致は PARSER_SCHEMA_MISMATCH として
+#    Fail Closed し、CSVを書かない(exit 1)。呼び出し元(fetch_target_financials.ps1)が
+#    parse_failed として前回CSV維持+fallback_used(stale)で処理する。
+#  - New速報行・会社予想行・四半期テーブル(区分見出し)は構造で区別して除外する。
 
 try {
     Ensure-Directory $OutputDir
@@ -252,18 +89,47 @@ try {
     $sourceText = Get-SourceText
     Test-AuthenticatedFinancialText $sourceText
 
-    $records = Parse-FinancialsFromText $sourceText
-    if ($records.Count -eq 0 -and (Test-Path -LiteralPath $htmlPath)) {
+    $parsedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $source = "text"
+    $parsed = Parse-AnnualFromText -Text $sourceText
+
+    if ($parsed.status -eq "absent" -and (Test-Path -LiteralPath $htmlPath)) {
+        # テキスト側に通期テーブルが存在しない(折りたたみ未展開等)場合のみHTMLへフォールバック。
+        # HTML側も同じ見出し検証を行い、通期業績推移セクション内のテーブルだけを対象にする
+        # (従来のdetail_year位置依存はCF表・進捗表の値を業績として誤取込していたため廃止)。
         $html = Get-Content -Path $htmlPath -Raw -Encoding UTF8
-        $records = Parse-FinancialsFromHtml $html
+        $source = "html"
+        $parsed = Parse-AnnualFromHtml -Html $html
     }
+
+    if ($parsed.status -eq "mismatch") {
+        $rawRef = if ($source -eq "html") { $htmlPath } else { $textPath }
+        foreach ($line in (Format-SchemaMismatchLogLines -BCode $BCode -FetchedAt $parsedAt `
+                -Mismatches $parsed.mismatches -RawPath $rawRef)) {
+            Write-RunLog $line
+        }
+        Write-RunLog "テーブル抽出失敗 bcode=$BCode error=PARSER_SCHEMA_MISMATCH source=$source"
+        throw "PARSER_SCHEMA_MISMATCH"
+    }
+
+    foreach ($ex in @($parsed.excluded)) {
+        if ($ex.reason -eq "new_flash_row") {
+            Write-RunLog "速報行除外 bcode=$BCode row=$([string]$ex.row)"
+        }
+    }
+    foreach ($w in @($parsed.warnings)) {
+        Write-RunLog ("PARSER_SCHEMA_WARNING bcode=$BCode table=$($w.table) reason=$($w.reason) " +
+                      "headers_found=$($w.headersFound) (検証済みテーブルから取得済みのため続行)")
+    }
+
+    $records = @($parsed.records)
     if ($records.Count -eq 0) {
-        Write-RunLog "テーブル抽出失敗 bcode=$BCode error=financial rows not found"
+        Write-RunLog "テーブル抽出失敗 bcode=$BCode error=financial rows not found source=$source"
         throw "financial rows not found"
     }
 
     $records | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-    Write-RunLog "テーブル抽出成功 path=$csvPath rows=$($records.Count) source=text"
+    Write-RunLog "テーブル抽出成功 path=$csvPath rows=$($records.Count) source=$source"
     Write-RunLog "END parse bcode=$BCode result=success"
 }
 catch {

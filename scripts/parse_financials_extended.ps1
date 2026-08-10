@@ -14,6 +14,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# ヘッダー検証型パーサ共通関数（2026-08-09 改修: 固定フィールド数regex依存を廃止）
+. (Join-Path $PSScriptRoot "parse_financials_core.ps1")
+
 $textPath = Join-Path $RawDir "$BCode.txt"
 $cashflowCsvPath = Join-Path $OutputDir "$BCode`_cashflow.csv"
 $indicatorsCsvPath = Join-Path $OutputDir "$BCode`_latest_indicators.csv"
@@ -34,21 +37,7 @@ function Write-RunLog {
     Add-Content -Path $LogPath -Value "[$timestamp] $Message" -Encoding UTF8
 }
 
-function Normalize-Value {
-    param([string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        return ""
-    }
-    $v = [System.Net.WebUtility]::HtmlDecode($Value).Trim()
-    $v = $v -replace [char]0x00A0, " "
-    $v = $v -replace ",", ""
-    $v = $v -replace "円|百万円|倍|％|%", ""
-    $v = $v -replace "\s+", ""
-    if ($v -match "^[-－―]+$" -or $v -eq "") {
-        return ""
-    }
-    return $v
-}
+# Normalize-Value は parse_financials_core.ps1 の共通実装（同一仕様）を使用する
 
 function Get-SourceText {
     if (-not (Test-Path -LiteralPath $textPath)) {
@@ -64,68 +53,13 @@ function Test-AuthenticatedFinancialText {
     }
 }
 
-function Get-SectionSlice {
-    param([string]$Text, [string]$StartMarker, [string]$EndMarker, [int]$FallbackLength = 4000)
-    $startIdx = $Text.IndexOf($StartMarker)
-    if ($startIdx -lt 0) {
-        return ""
-    }
-    $searchFrom = $startIdx + $StartMarker.Length
-    $endIdx = -1
-    if ($EndMarker) {
-        $endIdx = $Text.IndexOf($EndMarker, $searchFrom)
-    }
-    if ($endIdx -lt 0) {
-        $endIdx = [Math]::Min($Text.Length, $searchFrom + $FallbackLength)
-    }
-    return $Text.Substring($startIdx, $endIdx - $startIdx)
-}
-
-function Parse-CashflowSeries {
-    param([string]$Text)
-
-    $section = Get-SectionSlice -Text $Text -StartMarker "キャッシュフロー推移" -EndMarker "貸借対照表"
-    if ([string]::IsNullOrWhiteSpace($section)) {
-        return @()
-    }
-
-    $records = @()
-    $lines = $section -split "\r?\n"
-    foreach ($line in $lines) {
-        if ($line -match '^(\d{4}/\d{2}(?:\s+[SI])?)予?\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\s*$') {
-            $period = $Matches[1]
-            $records += [pscustomobject]@{
-                "決算期" = $period
-                "営業CF" = Normalize-Value $Matches[2]
-                "投資CF" = Normalize-Value $Matches[3]
-                "財務CF" = Normalize-Value $Matches[4]
-                "現金同等物" = Normalize-Value $Matches[5]
-                "フリーCF" = Normalize-Value $Matches[6]
-            }
-        }
-    }
-
-    $unique = @{}
-    foreach ($record in $records) {
-        if (-not $unique.ContainsKey($record."決算期")) {
-            $unique[$record."決算期"] = $record
-        }
-    }
-    return $unique.Values | Sort-Object "決算期"
-}
-
-function Parse-EpsForecast {
-    param([string]$Text)
-
-    if ($Text -match '(?m)^(\d{4}/\d{2})予\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\s*$') {
-        return [pscustomobject]@{
-            "決算期" = $Matches[1] + "予"
-            "EPS予想" = Normalize-Value $Matches[10]
-            "区分" = "会社予想"
-        }
-    }
-    return $null
-}
+# 2026-08-09 改修: Parse-CashflowSeries / Parse-EpsForecast の固定フィールド数regexを廃止し、
+# 見出し検証型(parse_financials_core.ps1)へ移行。
+#  - CF: 見出し(決算期/営業CF/投資CF/財務CF/現金・現金等価物/フリーCF)から列位置を動的決定。
+#    見出し不一致・行列数不一致は PARSER_SCHEMA_MISMATCH (Fail Closed、CSV未更新)。
+#  - EPS予想: 「予想行が本当に存在しない(→抽出なし)」と「予想行はあるが既知形式に
+#    一致しない(→PARSER_SCHEMA_MISMATCH、対象行をログ)」を区別する。
+#    New速報行(EPS列なしの速報値テーブル)は後者として扱う。
 
 function Parse-LatestIndicators {
     param([string]$Text)
@@ -170,10 +104,19 @@ try {
         $asOf = (Get-Item -LiteralPath $textPath).LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
     }
 
-    $cashflowRecords = Parse-CashflowSeries $sourceText
-    if ($cashflowRecords.Count -gt 0) {
-        $cashflowRecords | Export-Csv -Path $cashflowCsvPath -NoTypeInformation -Encoding UTF8
-        Write-RunLog "cashflow抽出成功 bcode=$BCode rows=$($cashflowRecords.Count)"
+    $schemaMismatch = $false
+
+    $cfResult = Parse-CashflowFromText -Text $sourceText
+    if ($cfResult.status -eq "ok") {
+        $cfResult.records | Export-Csv -Path $cashflowCsvPath -NoTypeInformation -Encoding UTF8
+        Write-RunLog "cashflow抽出成功 bcode=$BCode rows=$($cfResult.records.Count)"
+    } elseif ($cfResult.status -eq "mismatch") {
+        $schemaMismatch = $true
+        foreach ($line in (Format-SchemaMismatchLogLines -BCode $BCode -FetchedAt $asOf `
+                -Mismatches $cfResult.mismatches -RawPath $textPath)) {
+            Write-RunLog $line
+        }
+        Write-RunLog "cashflow抽出失敗 bcode=$BCode error=PARSER_SCHEMA_MISMATCH（前回CSVを維持）"
     } else {
         Write-RunLog "cashflow抽出失敗 bcode=$BCode rows=0"
     }
@@ -187,12 +130,26 @@ try {
         Write-RunLog "latest_indicators抽出失敗 bcode=$BCode"
     }
 
-    $forecast = Parse-EpsForecast $sourceText
-    if ($forecast) {
-        @($forecast) | Export-Csv -Path $forecastCsvPath -NoTypeInformation -Encoding UTF8
+    $fcResult = Parse-EpsForecastFromText -Text $sourceText
+    if ($fcResult.status -eq "ok") {
+        @($fcResult.record) | Export-Csv -Path $forecastCsvPath -NoTypeInformation -Encoding UTF8
         Write-RunLog "eps_forecast抽出成功 bcode=$BCode"
+    } elseif ($fcResult.status -eq "mismatch") {
+        $schemaMismatch = $true
+        foreach ($line in (Format-SchemaMismatchLogLines -BCode $BCode -FetchedAt $asOf `
+                -Mismatches $fcResult.mismatches -RawPath $textPath)) {
+            Write-RunLog $line
+        }
+        Write-RunLog "eps_forecast抽出失敗 bcode=$BCode error=PARSER_SCHEMA_MISMATCH（予想行はあるが既知形式に一致しない。前回CSVを維持）"
     } else {
         Write-RunLog "eps_forecast抽出なし bcode=$BCode（会社予想行が生テキストに存在しない）"
+    }
+
+    if ($schemaMismatch) {
+        # 正常に解釈できたセクションは保存済み。不一致セクションはCSV未更新のまま
+        # 失敗として明示する（呼び出し元では拡張パース失敗は非致命として扱われる）。
+        Write-RunLog "END parse_extended bcode=$BCode result=failed error=PARSER_SCHEMA_MISMATCH"
+        exit 1
     }
 
     Write-RunLog "END parse_extended bcode=$BCode result=success"

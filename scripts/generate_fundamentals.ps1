@@ -127,7 +127,11 @@ if (Test-Path -LiteralPath $FetchStatusPath) {
 }
 
 $rows = @()
-$errors = if (Test-Path -LiteralPath $ErrorPath) { @(Import-Csv -LiteralPath $ErrorPath -Encoding UTF8) } else { @() }
+# 2026-08-09 修正: if式の出力は配列が単一要素/空のときスカラー・$nullに縮退し、
+# エラー行が2件以上発生すると「+=」でop_Addition例外になる既存バグがあったため、
+# 全体を@()で包んで常に配列にする(null行も除外)。
+$errors = @(if (Test-Path -LiteralPath $ErrorPath) { Import-Csv -LiteralPath $ErrorPath -Encoding UTF8 } ) | Where-Object { $null -ne $_ }
+$errors = @($errors)
 
 foreach ($target in $targets) {
     $code = ([string]$target.code).Trim()
