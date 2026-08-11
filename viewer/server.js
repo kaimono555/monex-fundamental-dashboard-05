@@ -239,7 +239,7 @@ const MF_COLS = ["code", "analyst_rating", "target_price_gap", "progress_rate",
   "sales_growth_3y", "sales_growth_5y", "operating_growth_3y", "operating_growth_5y",
   "ordinary_growth_3y", "ordinary_growth_5y", "net_income_growth_3y", "net_income_growth_5y",
   "operating_margin_3y", "operating_margin_5y", "黒字継続年数", "dividend_increase_years",
-  "forecast_loss", "data_as_of", "updated_at"];
+  "forecast_loss", "current_price", "price_as_of", "data_as_of", "updated_at"];
 function parsePastedExtras(text) {
   const out = {};
   const lines = text.split(/\r?\n/);
@@ -649,6 +649,13 @@ async function apiManual(req, res) {
   const extras = parsePastedExtras(text);
   if (epsF.forecast_loss) extras.forecast_loss = epsF.forecast_loss;
   if (fin.last) extras.data_as_of = fin.last; // 貼付後の最新決算期
+  // 現在値（株価）: パイプライン側(generate_fundamentals.ps1)と同じ「現在値8,560.0円(08/10 15:30)」形式を抽出。
+  // 貼付文に無ければ何もしない（前回値を維持・エラーにしない）
+  const priceMatch = text.match(/現在値\s*([\-0-9.,]+)\s*円\(([^)]+)\)/);
+  if (priceMatch) {
+    extras.current_price = priceMatch[1].replace(/,/g, "");
+    extras.price_as_of = priceMatch[2].trim();
+  }
   const extrasSaved = Object.keys(extras).length;
   {
     const mfFile = path.join(DATA_DIR, "manual_fundamentals.csv");
@@ -784,6 +791,8 @@ function apiStocks(res) {
         growth: ms.growth, profitability: ms.profitability, financial: ms.financial,
       } : {}),
       data_as_of: mf.data_as_of || s.data_as_of,
+      current_price: mf.current_price || s.current_price,
+      price_as_of: mf.price_as_of || s.price_as_of,
       fetched_at: mf.updated_at,
       manual_override: true,
       fundamentals: (ms && ms.ind)
@@ -814,11 +823,15 @@ function apiStocks(res) {
       if (!m || known.has(m[1])) continue;
       const ms = buildManualScore(m[1]);
       const ind = ms ? ms.ind : null;
+      const mfRow = ms ? ms.mf : null;
       list.push({
         rank: "", code: m[1], name: manualNames.get(m[1]) || "(手動追加)",
         quality_rank: ms ? ms.quality_rank : "", quality_score: ms ? ms.quality_score : "",
         growth: ms ? ms.growth : "", profitability: ms ? ms.profitability : "", financial: ms ? ms.financial : "",
-        data_as_of: "", fetched_at: (ms && ms.mf && ms.mf.updated_at) || (ind ? (ind.data_as_of || "") : ""), manual: true,
+        data_as_of: (mfRow && mfRow.data_as_of) || (ind ? (ind.data_as_of || "") : ""),
+        current_price: mfRow ? mfRow.current_price : "",
+        price_as_of: mfRow ? mfRow.price_as_of : "",
+        fetched_at: (mfRow && mfRow.updated_at) || (ind ? (ind.data_as_of || "") : ""), manual: true,
         fundamentals: fmap.get(m[1]) || (ind ? { roe: ind.ROE || "", equity_ratio: ind["自己資本比率"] || "" } : null),
       });
     }
