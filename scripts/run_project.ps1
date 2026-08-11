@@ -56,22 +56,29 @@ function Get-Held09Codes([string]$DesktopDir) {
     return $result
 }
 
-# target_codes.csv（04由来）に無い09保有銘柄を末尾に追記する。
+# target_codes.csv（04由来）に無い追加コード（09保有銘柄・手動貼付追加銘柄など）を末尾に追記する。
 # 04 follow_candidates.csv との突合チェック（コード集合完全一致）はこの
 # 追記の「前」に行うため、既存の安全ガードはそのまま維持される。
-function Add-Held09CodesToTargetCodes {
+# 追記した行には source 列（例: "manual" "09_holding"）を付け、
+# 04由来の既存行は source="" のまま残す。これにより後段の
+# generate_fundamentals.ps1 / generate_fundamental_scores.ps1 / ビューア表示まで
+# 「手動貼付で追加した銘柄かどうか」が追跡できるようにする（2026-08-11 追加）。
+# $SourceLabel はログ表示用の日本語ラベル、$SourceTag はCSVに書き込む機械可読値。
+function Add-ExtraCodesToTargetCodes {
     param(
         [string]$ProjectRoot,
         [string]$TargetCodesPath,
         [string[]]$TargetSet,
-        [string[]]$HeldCodes
+        [string[]]$ExtraCodes,
+        [string]$SourceLabel,
+        [string]$SourceTag
     )
-    $missing = @($HeldCodes | Sort-Object -Unique | Where-Object { $_ -notin $TargetSet })
+    $missing = @($ExtraCodes | Sort-Object -Unique | Where-Object { $_ -notin $TargetSet })
     if ($missing.Count -eq 0) {
-        Write-Host "09保有銘柄はすべて04候補に含まれているため、target_codes.csvへの追記はありません。"
+        Write-Host "${SourceLabel}はすべて04候補に含まれているため、target_codes.csvへの追記はありません。"
         return
     }
-    Write-Host "09保有銘柄のうち04候補に無いコードを target_codes.csv に追記します: $($missing -join ',')"
+    Write-Host "${SourceLabel}のうち04候補に無いコードを target_codes.csv に追記します: $($missing -join ',')"
 
     $manualNamesPath = Join-Path $ProjectRoot "data\manual_names.csv"
     $manualNameMap = @{}
@@ -81,10 +88,15 @@ function Add-Held09CodesToTargetCodes {
         }
     }
 
-    $existingRows = @(Import-Csv -LiteralPath $TargetCodesPath -Encoding UTF8)
+    # 既存行は source 列が無ければ ""（04由来）として補い、全行のスキーマを揃えてから書き出す
+    # （Export-Csvは先頭要素のプロパティを基準に列を決めるため、揃えないと source 列が欠落する）。
+    $existingRows = @(Import-Csv -LiteralPath $TargetCodesPath -Encoding UTF8 | ForEach-Object {
+        $source = if ($_.PSObject.Properties.Name -contains "source") { [string]$_.source } else { "" }
+        [pscustomobject]@{ code = $_.code; name = $_.name; source = $source }
+    })
     $newRows = @($missing | ForEach-Object {
         $name = if ($manualNameMap.ContainsKey($_)) { $manualNameMap[$_] } else { "" }
-        [pscustomobject]@{ code = $_; name = $name }
+        [pscustomobject]@{ code = $_; name = $name; source = $SourceTag }
     })
     $allRows = @($existingRows) + $newRows
 
@@ -95,7 +107,19 @@ function Add-Held09CodesToTargetCodes {
     [System.IO.File]::WriteAllText($TargetCodesPath, $csvText, $utf8Bom)
     Remove-Item -LiteralPath $tempPath -Force
 
-    Write-Host "target_codes.csv 追記後の件数: $($allRows.Count)（04由来=$($existingRows.Count) + 09保有追加=$($newRows.Count)）"
+    Write-Host "target_codes.csv 追記後の件数: $($allRows.Count)（04由来=$($existingRows.Count) + ${SourceLabel}追加=$($newRows.Count)）"
+}
+
+# data/manual_names.csv に載っているコードのうち、target_codes.csv（04由来の68銘柄）に
+# 無いものを「手動貼付で追加した銘柄」として返す。manual_names.csvは通常の68銘柄の
+# 銘柄名上書き用にも使われる（重複して載っていることがある）ため、ここでは名前の
+# 一覧を返すだけにして、実際に「追加が必要かどうか」の判定は呼び出し側で
+# target_codes.csvとの差分（-notin）によって行う。
+function Get-ManualExtraCodes([string]$ProjectRoot) {
+    $manualNamesPath = Join-Path $ProjectRoot "data\manual_names.csv"
+    if (-not (Test-Path -LiteralPath $manualNamesPath)) { return @() }
+    return @(Import-Csv -LiteralPath $manualNamesPath -Encoding UTF8 |
+        ForEach-Object { ([string]$_.code).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
 Push-Location $ProjectRoot
@@ -142,7 +166,13 @@ try {
     }
 
     $Held09Codes = @(Get-Held09Codes $DesktopDir)
-    Add-Held09CodesToTargetCodes -ProjectRoot $ProjectRoot -TargetCodesPath $TargetCodesPath -TargetSet $TargetSet -HeldCodes $Held09Codes
+    Add-ExtraCodesToTargetCodes -ProjectRoot $ProjectRoot -TargetCodesPath $TargetCodesPath -TargetSet $TargetSet -ExtraCodes $Held09Codes -SourceLabel "09保有銘柄" -SourceTag "09_holding"
+
+    # 09保有銘柄の追記結果を反映した最新の集合を基準に、手動貼付追加銘柄の追記要否を判定する
+    # （同一コードが09保有かつ手動貼付追加の両方に該当していても二重追記しないため）。
+    $TargetSetAfter09 = @((Get-CodeList $TargetCodesPath) | Sort-Object -Unique)
+    $ManualExtraCodes = @(Get-ManualExtraCodes $ProjectRoot)
+    Add-ExtraCodesToTargetCodes -ProjectRoot $ProjectRoot -TargetCodesPath $TargetCodesPath -TargetSet $TargetSetAfter09 -ExtraCodes $ManualExtraCodes -SourceLabel "手動貼付追加銘柄" -SourceTag "manual"
 
     & (Join-Path $ScriptDir "fetch_target_financials.ps1")
     & (Join-Path $ScriptDir "generate_fundamentals.ps1")

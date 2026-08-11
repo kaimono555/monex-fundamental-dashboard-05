@@ -155,6 +155,10 @@ $errors = @($errors)
 foreach ($target in $targets) {
     $code = ([string]$target.code).Trim()
     $targetName = ([string]$target.name).Trim()
+    # 2026-08-11 追加: target_codes.csvのsource列（run_project.ps1のAdd-ExtraCodesToTargetCodesが
+    # 付与）をそのまま引き継ぐ。"manual"=手動貼付で追加、"09_holding"=09保有銘柄経由で追加、
+    # ""=04由来（通常の候補銘柄）。
+    $codeSource = if ($target.PSObject.Properties.Name -contains "source") { [string]$target.source } else { "" }
     $filePath = Join-Path $FinancialDir "$code`_financials.csv"
     $textPath = Join-Path $RawDir "$code.txt"
     $htmlPath = Join-Path $RawDir "$code.html"
@@ -243,6 +247,7 @@ foreach ($target in $targets) {
         $rows += [pscustomobject]@{
             code = $code
             name = $resolvedName
+            code_source = $codeSource
             roe = Format-Number $roe
             roic = Format-Number $roic
             equity_ratio = Format-Number $equityRatio

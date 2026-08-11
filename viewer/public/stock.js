@@ -14,8 +14,12 @@
   const name = (d.fundamentals && d.fundamentals.name) || (d.score && d.score.name) || d.manual_name || "";
   const asOf = d.fundamentals ? d.fundamentals.data_as_of : "";
   document.title = `${code} ${name} | 05 ローカルビューア`;
+  // code_source="manual"は自動取得(target_codes.csv)に組み込み済みの元手動貼付銘柄、
+  // viewer_computedはまだ組み込み前（ビューアがその場でスコア再算出中）の手動貼付銘柄を示す。
+  const isManualOrigin = (d.fundamentals && d.fundamentals.code_source === "manual") || (d.score && d.score.viewer_computed);
   document.getElementById("head").innerHTML = `
     <span class="code">${code}</span><span class="name">${name}</span>
+    ${isManualOrigin ? `<span class="badge" title="業績データ貼付機能で手動追加した銘柄です">手動追加</span>` : ""}
     ${asOf ? `<span class="badge">決算期 ${asOf}</span>` : ""}
     ${d.fundamentals && d.fundamentals.fetched_at ? `<span class="badge">取得 ${d.fundamentals.fetched_at}</span>` : ""}
     ${d.manual_updated_at ? `<span class="badge">手動更新 ${d.manual_updated_at}</span>` : ""}`;

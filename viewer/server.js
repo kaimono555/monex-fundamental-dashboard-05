@@ -971,6 +971,7 @@ function apiStocks(res) {
       const mfRow = ms ? ms.mf : null;
       list.push({
         rank: "", code: m[1], name: manualNames.get(m[1]) || "(手動追加)",
+        code_source: "manual",
         quality_rank: ms ? ms.quality_rank : "", quality_score: ms ? ms.quality_score : "",
         growth: ms ? ms.growth : "", profitability: ms ? ms.profitability : "", financial: ms ? ms.financial : "",
         valuation_score: ms ? ms.valuation_score : "", valuation_coverage: ms ? ms.valuation_coverage : "", valuation_status: ms ? ms.valuation_status : "",

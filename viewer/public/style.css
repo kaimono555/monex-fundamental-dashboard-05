@@ -116,6 +116,7 @@ table.data.src-tbl td, table.data.src-tbl th { vertical-align: top; }
 .hold-badge.hold { background: #e2f2e5; color: #1d7a3a; border: 1px solid #b6dfc0; }
 .hold-badge.watch { background: #eeeeea; color: #6a6a62; border: 1px solid #d5d5cc; }
 .hold-badge.fallback { background: #fdf1de; color: #a5680f; border: 1px solid #eed3a8; }
+.hold-badge.manual { background: #eef2f7; color: #1a5fb4; border: 1px solid #c9dcf0; }
 
 .del-btn { font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid #e0b4b4; background: #fbecec; color: #a33; cursor: pointer; }
 .del-btn:hover { background: #f6d9d9; }

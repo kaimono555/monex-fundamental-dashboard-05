@@ -388,6 +388,7 @@ foreach ($row in @(Import-Csv -LiteralPath $InputPath -Encoding UTF8)) {
         rank = 0
         code = $row.code
         name = $row.name
+        code_source = [string]$row.code_source
         current_price = $row.current_price
         price_as_of = $row.price_as_of
         quality_score = Format-Score $qualityScore
@@ -442,6 +443,7 @@ $rows = @($rows | ForEach-Object {
         rank = $rankIndex
         code = $_.code
         name = $_.name
+        code_source = $_.code_source
         current_price = $_.current_price
         price_as_of = $_.price_as_of
         quality_rank = $_.quality_rank
