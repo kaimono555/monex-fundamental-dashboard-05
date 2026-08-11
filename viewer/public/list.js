@@ -22,6 +22,13 @@
     growth: Number(s.growth) || 0,
     profitability: Number(s.profitability) || 0,
     financial: Number(s.financial) || 0,
+    // 2026-08-11 バリュエーション評価追加: total_rank_100/total_score_100は
+    // valuation_status=insufficient_dataの場合は空文字（未算出＝「-」表示）。
+    total_rank_100: s.total_rank_100 || "",
+    total_score_100: s.total_score_100 !== undefined && s.total_score_100 !== "" ? Number(s.total_score_100) : -1,
+    total_score_100_label: s.total_score_100 !== undefined && s.total_score_100 !== "" ? s.total_score_100 : "-",
+    valuation_score: s.valuation_score !== undefined && s.valuation_score !== "" ? Number(s.valuation_score) : null,
+    valuation_status: s.valuation_status || "",
     roe: s.fundamentals ? s.fundamentals.roe : "",
     equity_ratio: s.fundamentals ? s.fundamentals.equity_ratio : "",
     data_as_of: s.data_as_of || "",
@@ -50,11 +57,12 @@
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.code}</a></td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.name}</a>${r.watch09 ? `<span class="hold-badge ${r.holding ? "hold" : "watch"}">${r.holding ? "保有" : "監視"}</span>` : ""}${r.fallback_used ? `<span class="hold-badge fallback" title="最新取得に失敗し、前回データを表示中">再取得待ち</span>` : ""}</td>
         <td title="${r.price_as_of}">${r.current_price ? r.current_price.toLocaleString("ja-JP") + "円" : "-"}</td>
-        <td><span class="rank-${r.quality_rank}">${r.quality_rank}</span></td>
-        <td>${r.quality_score}</td>
+        <td><span class="rank-${r.total_rank_100}">${r.total_rank_100 || "-"}</span></td>
+        <td title="${r.valuation_status ? '内訳: 品質' + r.quality_score + ' + 割安' + (r.valuation_score != null ? r.valuation_score : '-') + '（' + r.valuation_status + '）' : ''}">${r.total_score_100_label}</td>
         <td>${r.growth}</td>
         <td>${r.profitability}</td>
         <td>${r.financial}</td>
+        <td title="${r.valuation_status || ''}">${r.valuation_score != null ? r.valuation_score : (r.valuation_status === "insufficient_data" ? "評価不能" : "-")}</td>
         <td>${r.roe !== "" ? r.roe + "%" : "-"}</td>
         <td>${r.equity_ratio !== "" ? r.equity_ratio + "%" : "-"}</td>
         <td class="l">${r.data_as_of}</td>

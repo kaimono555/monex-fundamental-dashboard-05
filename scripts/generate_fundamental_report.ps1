@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ScoresPath = "data/fundamental_scores.csv",
     [string]$ReportPath = "reports/fundamental_scores.md",
     [string]$ExcelPath = "reports/fundamental_scores.xlsx",
@@ -47,7 +47,7 @@ function New-ScoresWorkbook([string]$Path, $Rows) {
         New-Item -ItemType Directory -Force -Path (Join-Path $tempRoot "xl\_rels") | Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $tempRoot "xl\worksheets") | Out-Null
 
-        $headers = @("rank", "code", "name", "quality_rank", "quality_score", "growth", "profitability", "financial", "source_status", "stale_flag", "data_as_of", "fetched_at")
+        $headers = @("rank", "code", "name", "quality_rank", "quality_score", "growth", "profitability", "financial", "source_status", "stale_flag", "data_as_of", "fetched_at", "valuation_score", "valuation_status", "total_score_100", "total_rank_100")
         $sheetRows = [System.Text.StringBuilder]::new()
         $rowNumber = 1
         $null = $sheetRows.Append("<row r=""$rowNumber"">")
@@ -60,7 +60,7 @@ function New-ScoresWorkbook([string]$Path, $Rows) {
 
         foreach ($row in $Rows) {
             $rowNumber += 1
-            $values = @($row.rank, $row.code, $row.name, $row.quality_rank, $row.quality_score, $row.growth, $row.profitability, $row.financial, $row.source_status, $row.stale_flag, $row.data_as_of, $row.fetched_at)
+            $values = @($row.rank, $row.code, $row.name, $row.quality_rank, $row.quality_score, $row.growth, $row.profitability, $row.financial, $row.source_status, $row.stale_flag, $row.data_as_of, $row.fetched_at, $row.valuation_score, $row.valuation_status, $row.total_score_100, $row.total_rank_100)
             $null = $sheetRows.Append("<row r=""$rowNumber"">")
             for ($i = 0; $i -lt $values.Count; $i += 1) {
                 $cellRef = "$(ConvertTo-ExcelColumnName ($i + 1))$rowNumber"
@@ -151,6 +151,24 @@ function Add-ScoreTable([System.Collections.Generic.List[string]]$Lines, [string
     }
 }
 
+function Add-Total100ScoreTable([System.Collections.Generic.List[string]]$Lines, [string]$Title, $Rows) {
+    $items = @($Rows)
+    $Lines.Add("")
+    $Lines.Add("## $Title")
+    $Lines.Add("")
+    if ($items.Count -eq 0) {
+        $Lines.Add("none")
+        return
+    }
+    $Lines.Add("| rank | code | name | total_rank_100 | total_score_100 | quality_score | valuation_score | valuation_status | data_as_of |")
+    $Lines.Add("|---:|---|---|---:|---:|---:|---:|---|---|")
+    $rank = 1
+    foreach ($row in $items) {
+        $Lines.Add("| $rank | $(Format-Cell $row.code) | $(Format-Cell $row.name) | $(Format-Cell $row.total_rank_100) | $(Format-Cell $row.total_score_100) | $(Format-Cell $row.quality_score) | $(Format-Cell $row.valuation_score) | $(Format-Cell $row.valuation_status) | $(Format-Cell $row.data_as_of) |")
+        $rank += 1
+    }
+}
+
 if (-not (Test-Path -LiteralPath $ScoresPath)) {
     throw "input file not found: $ScoresPath"
 }
@@ -167,11 +185,12 @@ if ($FallbackReport) {
 }
 $lines.Add("generated_at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 $lines.Add("")
-$lines.Add("quality_score = growth + profitability + financial")
+$lines.Add("quality_score = growth + profitability + financial（80点満点・従来どおり不変）")
+$lines.Add("total_score_100 = quality_score + valuation_score（新規・valuation_status=insufficient_dataの銘柄は算出しない）")
 
 $rankCounts = @($rows | Group-Object quality_rank | Sort-Object Name)
 $lines.Add("")
-$lines.Add("## quality_rank counts")
+$lines.Add("## quality_rank counts（従来80点満点ランク・不変）")
 $lines.Add("")
 $lines.Add("| quality_rank | count |")
 $lines.Add("|---|---:|")
@@ -179,11 +198,24 @@ foreach ($group in $rankCounts) {
     $lines.Add("| $(Format-Cell $group.Name) | $($group.Count) |")
 }
 
+$totalRankCounts = @($rows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.total_rank_100) } | Group-Object total_rank_100 | Sort-Object Name)
+$insufficientCount = @($rows | Where-Object { $_.valuation_status -eq "insufficient_data" }).Count
+$lines.Add("")
+$lines.Add("## total_rank_100 counts（新規・100点満点ランク）")
+$lines.Add("")
+$lines.Add("| total_rank_100 | count |")
+$lines.Add("|---|---:|")
+foreach ($group in $totalRankCounts) {
+    $lines.Add("| $(Format-Cell $group.Name) | $($group.Count) |")
+}
+$lines.Add("| (insufficient_data、N/A) | $insufficientCount |")
+
 Add-ScoreTable $lines "Top 20" (@($rows | Sort-Object @{ Expression = { -[double]$_.quality_score } }, code | Select-Object -First 20))
 Add-ScoreTable $lines "Growth top 10" (@($rows | Sort-Object @{ Expression = { -[double]$_.growth } }, code | Select-Object -First 10))
 Add-ScoreTable $lines "Profitability top 10" (@($rows | Sort-Object @{ Expression = { -[double]$_.profitability } }, code | Select-Object -First 10))
 Add-ScoreTable $lines "Financial top 10" (@($rows | Sort-Object @{ Expression = { -[double]$_.financial } }, code | Select-Object -First 10))
 Add-ScoreTable $lines "Overall top 20" (@($rows | Sort-Object @{ Expression = { -[double]$_.quality_score } }, code | Select-Object -First 20))
+Add-Total100ScoreTable $lines "Total100 top 20" (@($rows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.total_score_100) } | Sort-Object @{ Expression = { -[double]$_.total_score_100 } }, code | Select-Object -First 20))
 
 $utf8Bom = [System.Text.UTF8Encoding]::new($true)
 [System.IO.File]::WriteAllLines((Resolve-Path (Split-Path $ReportPath -Parent) | Join-Path -ChildPath (Split-Path $ReportPath -Leaf)), $lines, $utf8Bom)

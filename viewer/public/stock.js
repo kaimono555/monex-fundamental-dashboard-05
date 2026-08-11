@@ -21,15 +21,34 @@
     ${d.manual_updated_at ? `<span class="badge">手動更新 ${d.manual_updated_at}</span>` : ""}`;
 
   // ---- スコア ----
+  // 2026-08-11 バリュエーション評価追加: total_score_100(=quality_score(80)+valuation_score(20))と
+  // 内訳A〜Eを表示。quality_score/quality_rank(80点満点・従来どおり不変)も引き続き参照可能にする。
   const sg = document.getElementById("scoreGrid");
   if (d.score) {
     const s = d.score;
+    const hasTotal = s.total_score_100 !== "" && s.total_score_100 != null;
+    const statusLabel = { normal: "通常", reference: "参考", insufficient_data: "評価不能" }[s.valuation_status] || s.valuation_status || "-";
+    // CSV由来(fundamental_scores.csv)はbooleanが文字列"True"/"False"で来るため、
+    // 手動貼付経路の実booleanと両対応で真偽判定する（"False"文字列はJSではtruthyな点に注意）。
+    const isTrue = v => v === true || v === "True" || v === "TRUE";
     sg.innerHTML = [
-      ["総合ランク", s.quality_rank], ["総合スコア", s.quality_score],
+      ["総合ランク(100点)", hasTotal ? s.total_rank_100 : "-"], ["総合スコア(100点)", hasTotal ? s.total_score_100 : "評価不能(データ不足)"],
+      ["旧品質ランク(80点)", s.quality_rank], ["旧品質スコア(80点)", s.quality_score],
       ["成長性", s.growth], ["収益性", s.profitability], ["財務", s.financial],
+      ["割安度(20点)", s.valuation_score !== "" && s.valuation_score != null ? s.valuation_score : "-"],
+      ["割安度カバレッジ", s.valuation_coverage !== "" && s.valuation_coverage != null ? s.valuation_coverage + "%" : "-"],
+      ["割安度ステータス", statusLabel],
       ["順位", s.rank !== "" && s.rank != null ? `${s.rank} 位` : "-"],
     ].map(([k, v]) => `<div class="ind-cell"><span class="k">${k}</span><span class="v">${v !== "" && v != null ? v : "-"}</span></div>`).join("") +
-    (s.viewer_computed ? `<div class="muted" style="grid-column:1/-1">※ 手動貼付データからビューアが同一式で再算出した参考値${s.rank !== "" && s.rank != null ? "（順位はパイプライン算出時点のもの）" : "（60銘柄ランキングの順位対象外）"}</div>` : "");
+    `<div class="ind-cell"><span class="k">A 自社過去PER相対(6点)</span><span class="v">${isTrue(s.valuation_a_available) ? s.valuation_a_score : "評価対象外"}</span></div>` +
+    `<div class="ind-cell"><span class="k">B PEG(5点)</span><span class="v">${isTrue(s.valuation_b_available) ? s.valuation_b_score + (s.valuation_b_source ? ` (${s.valuation_b_source})` : "") : "評価対象外"}</span></div>` +
+    `<div class="ind-cell"><span class="k">C EV/EBITDA(4点)</span><span class="v">${isTrue(s.valuation_c_available) ? s.valuation_c_score : "評価対象外"}</span></div>` +
+    `<div class="ind-cell"><span class="k">D PBR/ROE(3点)</span><span class="v">${isTrue(s.valuation_d_available) ? s.valuation_d_score : "評価対象外"}</span></div>` +
+    `<div class="ind-cell"><span class="k">E 52週株価水準(2点)</span><span class="v">${isTrue(s.valuation_e_available) ? s.valuation_e_score : "評価対象外"}</span></div>` +
+    (s.target_price ? `<div class="ind-cell"><span class="k">目標株価（参考）</span><span class="v">${Number(s.target_price).toLocaleString("ja-JP")}円${s.target_price_gap !== "" && s.target_price_gap != null ? ` (乖離率${Number(s.target_price_gap) >= 0 ? "+" : ""}${s.target_price_gap}%・参考)` : ""}</span></div>` : "") +
+    (s.viewer_computed ? `<div class="muted" style="grid-column:1/-1">※ 手動貼付データからビューアが同一式で再算出した参考値${s.rank !== "" && s.rank != null ? "（順位はパイプライン算出時点のもの）" : "（60銘柄ランキングの順位対象外）"}</div>` : "") +
+    (s.valuation_status === "reference" ? `<div class="muted" style="grid-column:1/-1">※ 割安度は評価可能項目が少なく（カバレッジ${s.valuation_coverage}%）、参考値として扱ってください</div>` : "") +
+    (s.valuation_status === "insufficient_data" ? `<div class="muted" style="grid-column:1/-1">※ 割安度は評価可能なデータが不足しているため算出していません（総合スコアも未算出）</div>` : "");
   } else sg.innerHTML = `<span class="muted">スコアなし（業績データのみ。指標を含む銘柄ページ全文を貼付するとスコアが算出されます）</span>`;
 
   // ---- 通期業績推移（3グラフ常時表示・会社予想は半透明で末尾に表示） ----

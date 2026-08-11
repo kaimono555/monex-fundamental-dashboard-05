@@ -79,6 +79,28 @@ function Parse-LatestIndicators {
         return ""
     }
 
+    # 2026-08-11 バリュエーション評価追加: 「指標一覧」節（割安性関連指標）内の
+    # 相対水準・EV/EBITDA・PEGを追加抽出する。既存7項目の抽出方法・列は変更しない。
+    $per2y = Get-LabelValue $section "予想PER相対水準（2年）"
+    $per5y = Get-LabelValue $section "予想PER相対水準（5年）"
+    $pbr2y = Get-LabelValue $section "PBR相対水準（2年）"
+    $pbr5y = Get-LabelValue $section "PBR相対水準（5年）"
+    $evEbitda = Get-LabelValue $section "EV/EBITDA"
+    $peg = Get-LabelValue $section "予想PEGレシオ"
+
+    # 52週株価水準と目標株価(絶対額)は「指標一覧」より前（株価分析／アナリスト評価節・
+    # ページ上部ヘッダー）に出現するため、指標一覧の節ではなく全文($Text)から取得する。
+    # 目標株価の株価乖離率(%)は generate_fundamentals.ps1 が別途 target_price_gap として
+    # 抽出済みのため、ここでは絶対額(円)と52週株価水準のみを追加する。
+    $week52 = ""
+    if ($Text -match "52週株価水準\t[^\r\n]*\r?\n([\-0-9.]+)") {
+        $week52 = Normalize-Value $Matches[1]
+    }
+    $targetPrice = ""
+    if ($Text -match "目標株価[\s\S]{0,20}\(コ\)[\s\S]{0,40}?([0-9,]+)円") {
+        $targetPrice = Normalize-Value $Matches[1]
+    }
+
     return [pscustomobject]@{
         "ROE" = Get-LabelValue $section "実績ROE"
         "ROIC" = Get-LabelValue $section "ROIC"
@@ -87,6 +109,14 @@ function Parse-LatestIndicators {
         "自己資本比率" = Get-LabelValue $section "自己資本比率"
         "有利子負債比率" = Get-LabelValue $section "有利子負債比率"
         "ネットD_Eレシオ" = Get-LabelValue $section "ネットD/Eレシオ"
+        "PER相対水準2年" = $per2y
+        "PER相対水準5年" = $per5y
+        "PBR相対水準2年" = $pbr2y
+        "PBR相対水準5年" = $pbr5y
+        "EV_EBITDA" = $evEbitda
+        "予想PEGレシオ" = $peg
+        "52週株価水準" = $week52
+        "目標株価" = $targetPrice
     }
 }
 

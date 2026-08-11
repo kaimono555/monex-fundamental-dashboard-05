@@ -207,7 +207,12 @@ function cellValue(cells, i) {
   return null;
 }
 
-const IND_COLS = ["ROE", "ROIC", "PER予想", "PBR", "自己資本比率", "有利子負債比率", "ネットD_Eレシオ", "data_as_of"];
+// 2026-08-11 バリュエーション評価追加: PER相対水準(2年/5年)・PBR相対水準(2年/5年)・
+// EV/EBITDA・予想PEGレシオを追加。parse_financials_extended.ps1(Parse-LatestIndicators)
+// と同一の列名・同一のラベルを使い、自動取得と手動貼付で同じCSVスキーマにする。
+const IND_COLS = ["ROE", "ROIC", "PER予想", "PBR", "自己資本比率", "有利子負債比率", "ネットD_Eレシオ",
+  "PER相対水準2年", "PER相対水準5年", "PBR相対水準2年", "PBR相対水準5年", "EV_EBITDA", "予想PEGレシオ",
+  "52週株価水準", "目標株価", "data_as_of"];
 const IND_ALIASES = {
   "ROE": ["実績ROE", "ROE(実)", "ROE（実）"],
   "ROIC": ["ROIC", "ROIC(実)", "ROIC（実）"],
@@ -216,6 +221,12 @@ const IND_ALIASES = {
   "自己資本比率": ["自己資本比率"],
   "有利子負債比率": ["有利子負債比率", "有利子負債率"],
   "ネットD_Eレシオ": ["ネットD/Eレシオ", "ネットD_Eレシオ"],
+  "PER相対水準2年": ["予想PER相対水準（2年）", "予想PER相対水準(2年)"],
+  "PER相対水準5年": ["予想PER相対水準（5年）", "予想PER相対水準(5年)"],
+  "PBR相対水準2年": ["PBR相対水準（2年）", "PBR相対水準(2年)"],
+  "PBR相対水準5年": ["PBR相対水準（5年）", "PBR相対水準(5年)"],
+  "EV_EBITDA": ["EV/EBITDA"],
+  "予想PEGレシオ": ["予想PEGレシオ"],
 };
 function parsePastedIndicators(text) {
   const out = {};
@@ -231,6 +242,12 @@ function parsePastedIndicators(text) {
       }
     }
   }
+  // 52週株価水準・目標株価はラベルと値が別行に分かれる(ページ上部ヘッダー/株価分析節)ため、
+  // parse_financials_extended.ps1 と同じ全文regexで抽出する（同一行lookaheadでは取得不可）。
+  const week52M = text.match(/52週株価水準\t[^\r\n]*\r?\n([\-0-9.]+)/);
+  if (week52M) out["52週株価水準"] = week52M[1];
+  const targetPriceM = text.match(/目標株価[\s\S]{0,20}\(コ\)[\s\S]{0,40}?([0-9,]+)円/);
+  if (targetPriceM) out["目標株価"] = targetPriceM[1].replace(/,/g, "");
   return out;
 }
 
@@ -239,10 +256,15 @@ const MF_COLS = ["code", "analyst_rating", "target_price_gap", "progress_rate",
   "sales_growth_3y", "sales_growth_5y", "operating_growth_3y", "operating_growth_5y",
   "ordinary_growth_3y", "ordinary_growth_5y", "net_income_growth_3y", "net_income_growth_5y",
   "operating_margin_3y", "operating_margin_5y", "黒字継続年数", "dividend_increase_years",
-  "forecast_loss", "current_price", "price_as_of", "data_as_of", "updated_at"];
+  "forecast_loss", "current_price", "price_as_of", "data_as_of", "updated_at",
+  "ordinary_income_consensus_growth"];
 function parsePastedExtras(text) {
   const out = {};
   const lines = text.split(/\r?\n/);
+  // B.PEG用: 予想経常利益(コンセンサス)増益率。generate_fundamentals.ps1の
+  // Get-OrdinaryIncomeConsensusGrowth と同一パターン（全文regex、行分割の外）。
+  const ordM = text.match(/予想経常利益[\s\S]{0,10}\(コ\)[\s\S]{0,30}\(増益率\)[\s\S]{0,10}[\d,\-]+[\s\S]{0,10}\(([\-0-9.]+)%\)/);
+  if (ordM) out.ordinary_income_consensus_growth = ordM[1];
   const growthCols = ["sales", "operating", "ordinary", "net_income"];
   for (let li = 0; li < lines.length; li++) {
     const cells = lines[li].split("\t").map(c => c.trim());
@@ -340,6 +362,81 @@ function computeQualityScore(src) {
   };
 }
 
+// ===========================================================================
+// バリュエーション評価（20点満点）2026-08-11 追加
+// scripts/generate_fundamental_scores.ps1 の Get-ValuationA〜E / Get-ValuationResult と
+// 同一の閾値・同一の計算式（PowerShell版と一致させる。自動取得/手動貼付で結果を揃えるため）。
+// ===========================================================================
+function valA(src) {
+  const rel2y = numOrNull(src.per_relative_2y), rel5y = numOrNull(src.per_relative_5y);
+  if (rel2y == null && rel5y == null) return { available: false, score: 0, value: null, max: 6 };
+  const combined = (rel2y != null && rel5y != null) ? (rel5y * 0.6 + rel2y * 0.4) : (rel5y != null ? rel5y : rel2y);
+  const score = thresholdScore(100 - combined, [80, 65, 50, 35, 20, 10], [6, 5, 4, 3, 2, 1]);
+  return { available: true, score, value: combined, max: 6 };
+}
+function growthForPeg(src) {
+  const epsLatest = numOrNull(src.eps_actual_latest), epsNext = numOrNull(src.eps_forecast_next);
+  if (epsLatest != null && epsLatest > 0 && epsNext != null) {
+    const g = ((epsNext - epsLatest) / epsLatest) * 100;
+    if (g > 0 && g <= 200) return { growth: Math.min(g, 60), source: "eps_forecast" };
+  }
+  const ordPrev = numOrNull(src.ordinary_income_actual_prev_year), ordGrowth = numOrNull(src.ordinary_income_consensus_growth);
+  if (ordPrev != null && ordPrev > 0 && ordGrowth != null) {
+    if (ordGrowth > 0 && ordGrowth <= 200) return { growth: Math.min(ordGrowth, 60), source: "ordinary_consensus" };
+  }
+  return { growth: null, source: "" };
+}
+function valB(src) {
+  const pegMonex = numOrNull(src.peg_monex);
+  let peg = null, source = "";
+  if (pegMonex != null && pegMonex > 0) { peg = pegMonex; source = "monex_peg"; }
+  else {
+    const perForecast = numOrNull(src.per_forecast);
+    if (perForecast != null && perForecast > 0) {
+      const g = growthForPeg(src);
+      if (g.growth != null) { peg = perForecast / g.growth; source = g.source; }
+    }
+  }
+  if (peg == null || peg <= 0) return { available: false, score: 0, value: null, source: "", max: 5 };
+  const score = thresholdScore(0 - peg, [-0.7, -1.0, -1.5, -2.0, -2.5], [5, 4, 3, 2, 1]);
+  return { available: true, score, value: peg, source, max: 5 };
+}
+function valC(src) {
+  const ev = numOrNull(src.ev_ebitda);
+  if (ev == null) return { available: false, score: 0, value: null, max: 4 };
+  const score = thresholdScore(0 - ev, [-10.8, -13.2, -22.9, -32.8], [4, 3, 2, 1]);
+  return { available: true, score, value: ev, max: 4 };
+}
+function valD(src) {
+  const pbr = numOrNull(src.pbr), roe = numOrNull(src.roe);
+  if (pbr == null || roe == null || roe <= 0) return { available: false, score: 0, value: null, max: 3 };
+  const ratio = pbr / roe;
+  const score = thresholdScore(0 - ratio, [-0.152, -0.212, -0.347], [3, 2, 1]);
+  return { available: true, score, value: ratio, max: 3 };
+}
+function valE(src) {
+  const level = numOrNull(src.week52_level);
+  if (level == null) return { available: false, score: 0, value: null, max: 2 };
+  const score = thresholdScore(0 - level, [-41.4, -75.6], [2, 1]);
+  return { available: true, score, value: level, max: 2 };
+}
+function numOrNull(x) { if (x === undefined || x === null || String(x).trim() === "") return null; const n = parseFloat(String(x).replace(/,/g, "")); return isNaN(n) ? null : n; }
+function totalRank100(score) {
+  if (score >= 85) return "A"; if (score >= 70) return "B"; if (score >= 55) return "C"; if (score >= 40) return "D"; return "E";
+}
+function computeValuation(src) {
+  const a = valA(src), b = valB(src), c = valC(src), d = valD(src), e = valE(src);
+  let availableMax = 0, earned = 0;
+  for (const item of [a, b, c, d, e]) { if (item.available) { availableMax += item.max; earned += item.score; } }
+  const coverage = availableMax / 20;
+  let status = "insufficient_data", score = null;
+  if (availableMax >= 9) {
+    score = (earned / availableMax) * 20;
+    status = coverage >= 0.70 ? "normal" : (coverage >= 0.45 ? "reference" : "insufficient_data");
+  }
+  return { a, b, c, d, e, available_max: availableMax, earned, coverage, status, score };
+}
+
 // 手動追加銘柄のスコア入力（latest_indicators + manual_fundamentals）を組み立てる
 function buildManualScore(code) {
   const ind = (csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_latest_indicators.csv`)) || [])[0] || null;
@@ -355,7 +452,47 @@ function buildManualScore(code) {
     profit_streak_years: mf ? mf["黒字継続年数"] : "",
     forecast_loss: mf ? mf.forecast_loss : "",
   };
-  return { ...computeQualityScore(src), viewer_computed: true, ind, mf };
+  const quality = computeQualityScore(src);
+
+  // バリュエーション評価用の追加データ（自動取得と同じ生ファイルを参照するのみ。独自regexは追加しない）
+  const finRows = (csvToObjects(path.join(DATA_DIR, "output", `${code}_financials.csv`)) || [])
+    .filter(r => !/New|予/.test(String(r["決算期"])));
+  const latestFin = finRows.length ? finRows[finRows.length - 1] : null;
+  const prevFin = finRows.length >= 2 ? finRows[finRows.length - 2] : null;
+  const epsForecastRows = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_eps_forecast.csv`)) || [];
+  const valSrc = {
+    per_forecast: ind ? ind["PER予想"] : "",
+    per_relative_2y: ind ? ind["PER相対水準2年"] : "",
+    per_relative_5y: ind ? ind["PER相対水準5年"] : "",
+    pbr: ind ? ind["PBR"] : "",
+    ev_ebitda: ind ? ind["EV_EBITDA"] : "",
+    peg_monex: ind ? ind["予想PEGレシオ"] : "",
+    week52_level: ind ? ind["52週株価水準"] : "",
+    roe: ind ? ind.ROE : "",
+    eps_actual_latest: latestFin ? latestFin["EPS"] : "",
+    eps_forecast_next: epsForecastRows.length ? epsForecastRows[0]["EPS予想"] : "",
+    ordinary_income_actual_prev_year: prevFin ? prevFin["経常利益"] : "",
+    ordinary_income_consensus_growth: mf ? mf.ordinary_income_consensus_growth : "",
+  };
+  const valuation = computeValuation(valSrc);
+  const qualityScoreNum = parseFloat(quality.quality_score) || 0;
+  const totalScore100 = valuation.score != null ? qualityScoreNum + valuation.score : null;
+
+  return {
+    ...quality, viewer_computed: true, ind, mf,
+    valuation_score: valuation.score != null ? fmtScore(valuation.score) : "",
+    valuation_coverage: Math.round(valuation.coverage * 1000) / 10,
+    valuation_status: valuation.status,
+    valuation_a_score: fmtScore(valuation.a.score), valuation_a_available: valuation.a.available,
+    valuation_b_score: fmtScore(valuation.b.score), valuation_b_available: valuation.b.available, valuation_b_source: valuation.b.source,
+    valuation_c_score: fmtScore(valuation.c.score), valuation_c_available: valuation.c.available,
+    valuation_d_score: fmtScore(valuation.d.score), valuation_d_available: valuation.d.available,
+    valuation_e_score: fmtScore(valuation.e.score), valuation_e_available: valuation.e.available,
+    target_price: ind ? ind["目標株価"] : "",
+    target_price_gap: mf ? mf.target_price_gap : "",
+    total_score_100: totalScore100 != null ? fmtScore(totalScore100) : "",
+    total_rank_100: totalScore100 != null ? totalRank100(totalScore100) : "",
+  };
 }
 
 // 四半期業績推移: 「2026/06 New 1Q 402,009 50.1% ...」形式（%列は除外して取り込む）
@@ -789,6 +926,14 @@ function apiStocks(res) {
       ...(ms ? {
         quality_rank: ms.quality_rank, quality_score: ms.quality_score,
         growth: ms.growth, profitability: ms.profitability, financial: ms.financial,
+        valuation_score: ms.valuation_score, valuation_coverage: ms.valuation_coverage, valuation_status: ms.valuation_status,
+        valuation_a_score: ms.valuation_a_score, valuation_a_available: ms.valuation_a_available,
+        valuation_b_score: ms.valuation_b_score, valuation_b_available: ms.valuation_b_available, valuation_b_source: ms.valuation_b_source,
+        valuation_c_score: ms.valuation_c_score, valuation_c_available: ms.valuation_c_available,
+        valuation_d_score: ms.valuation_d_score, valuation_d_available: ms.valuation_d_available,
+        valuation_e_score: ms.valuation_e_score, valuation_e_available: ms.valuation_e_available,
+        target_price: ms.target_price, target_price_gap: ms.target_price_gap,
+        total_score_100: ms.total_score_100, total_rank_100: ms.total_rank_100,
       } : {}),
       data_as_of: mf.data_as_of || s.data_as_of,
       current_price: mf.current_price || s.current_price,
@@ -828,6 +973,14 @@ function apiStocks(res) {
         rank: "", code: m[1], name: manualNames.get(m[1]) || "(手動追加)",
         quality_rank: ms ? ms.quality_rank : "", quality_score: ms ? ms.quality_score : "",
         growth: ms ? ms.growth : "", profitability: ms ? ms.profitability : "", financial: ms ? ms.financial : "",
+        valuation_score: ms ? ms.valuation_score : "", valuation_coverage: ms ? ms.valuation_coverage : "", valuation_status: ms ? ms.valuation_status : "",
+        valuation_a_score: ms ? ms.valuation_a_score : "", valuation_a_available: ms ? ms.valuation_a_available : false,
+        valuation_b_score: ms ? ms.valuation_b_score : "", valuation_b_available: ms ? ms.valuation_b_available : false, valuation_b_source: ms ? ms.valuation_b_source : "",
+        valuation_c_score: ms ? ms.valuation_c_score : "", valuation_c_available: ms ? ms.valuation_c_available : false,
+        valuation_d_score: ms ? ms.valuation_d_score : "", valuation_d_available: ms ? ms.valuation_d_available : false,
+        valuation_e_score: ms ? ms.valuation_e_score : "", valuation_e_available: ms ? ms.valuation_e_available : false,
+        target_price: ms ? ms.target_price : "", target_price_gap: ms ? ms.target_price_gap : "",
+        total_score_100: ms ? ms.total_score_100 : "", total_rank_100: ms ? ms.total_rank_100 : "",
         data_as_of: (mfRow && mfRow.data_as_of) || (ind ? (ind.data_as_of || "") : ""),
         current_price: mfRow ? mfRow.current_price : "",
         price_as_of: mfRow ? mfRow.price_as_of : "",
@@ -901,7 +1054,15 @@ function apiStock(res, code) {
     const ms = buildManualScore(code);
     if (ms) {
       score = { rank: scoreRow ? scoreRow.rank : "", quality_rank: ms.quality_rank, quality_score: ms.quality_score,
-        growth: ms.growth, profitability: ms.profitability, financial: ms.financial, viewer_computed: true };
+        growth: ms.growth, profitability: ms.profitability, financial: ms.financial, viewer_computed: true,
+        valuation_score: ms.valuation_score, valuation_coverage: ms.valuation_coverage, valuation_status: ms.valuation_status,
+        valuation_a_score: ms.valuation_a_score, valuation_a_available: ms.valuation_a_available,
+        valuation_b_score: ms.valuation_b_score, valuation_b_available: ms.valuation_b_available, valuation_b_source: ms.valuation_b_source,
+        valuation_c_score: ms.valuation_c_score, valuation_c_available: ms.valuation_c_available,
+        valuation_d_score: ms.valuation_d_score, valuation_d_available: ms.valuation_d_available,
+        valuation_e_score: ms.valuation_e_score, valuation_e_available: ms.valuation_e_available,
+        target_price: ms.target_price, target_price_gap: ms.target_price_gap,
+        total_score_100: ms.total_score_100, total_rank_100: ms.total_rank_100 };
     }
   }
 
@@ -1093,15 +1254,21 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  const nets = require("os").networkInterfaces();
-  const ips = [];
-  for (const name of Object.keys(nets)) {
-    for (const n of nets[name] || []) {
-      if (n.family === "IPv4" && !n.internal) ips.push(n.address);
+// テスト（scripts/test_valuation_parity.js）からの require 時はHTTPサーバーを起動しない。
+// node viewer/server.js で直接実行した場合のみ listen する（既存の起動方法は変更なし）。
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    const nets = require("os").networkInterfaces();
+    const ips = [];
+    for (const name of Object.keys(nets)) {
+      for (const n of nets[name] || []) {
+        if (n.family === "IPv4" && !n.internal) ips.push(n.address);
+      }
     }
-  }
-  console.log(`[viewer] listening on:`);
-  console.log(`  http://localhost:${PORT}/`);
-  ips.forEach(ip => console.log(`  http://${ip}:${PORT}/  (LAN)`));
-});
+    console.log(`[viewer] listening on:`);
+    console.log(`  http://localhost:${PORT}/`);
+    ips.forEach(ip => console.log(`  http://${ip}:${PORT}/  (LAN)`));
+  });
+}
+
+module.exports = { computeValuation, computeQualityScore, buildManualScore };

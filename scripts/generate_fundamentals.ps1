@@ -2,6 +2,7 @@
     [string]$TargetPath = "data/target_codes.csv",
     [string]$FinancialDir = "data/output",
     [string]$RawDir = "data/raw",
+    [string]$ExtendedDir = "data/output_extended",
     [string]$FetchStatusPath = "data/fetch_status.csv",
     [string]$OutputPath = "data/fundamentals.csv",
     [string]$ErrorPath = "logs/fundamental_fetch_errors.csv"
@@ -104,6 +105,24 @@ function Test-ForecastLoss([string]$Text) {
     return ($Text -match "赤字予想" -or $Text -match "予想[\s\S]{0,40}赤字" -or $Text -match "営業赤字" -or $Text -match "経常赤字")
 }
 
+# 2026-08-11 バリュエーション評価追加: 予想経常利益(コンセンサス)の増益率(%)。
+# ページ上部ヘッダーにのみ出現し「指標一覧」節の外のため、他のPER/PBR等とは別に
+# ここで直接抽出する(target_price_gapと同じ抽出方式)。値は raw fact のみで採点はしない。
+function Get-OrdinaryIncomeConsensusGrowth([string]$Text) {
+    return Get-FirstRegexNumber $Text @("予想経常利益[\s\S]{0,10}\(コ\)[\s\S]{0,30}\(増益率\)[\s\S]{0,10}[\d,\-]+[\s\S]{0,10}\(([\-0-9.]+)%\)")
+}
+
+# latest_indicators.csv (parse_financials_extended.ps1が既に抽出済み) から
+# PER/PBR/EV_EBITDA等を読み込む。同じ値を本スクリプトで再度regex抽出すると
+# 将来ズレる可能性があるため、単一の抽出元(parse_financials_extended.ps1)を再利用する。
+function Get-LatestIndicatorsRow([string]$Code, [string]$ExtendedDir) {
+    $path = Join-Path $ExtendedDir "$Code`_latest_indicators.csv"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $rows = @(Import-Csv -LiteralPath $path -Encoding UTF8)
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0]
+}
+
 if (-not (Test-Path -LiteralPath $FinancialDir)) {
     throw "financial directory not found: $FinancialDir"
 }
@@ -152,11 +171,16 @@ foreach ($target in $targets) {
         $latest = $financialRows[$latestIndex]
         $base3 = if ($latestIndex -ge 3) { $financialRows[$latestIndex - 3] } else { $null }
         $base5 = if ($latestIndex -ge 5) { $financialRows[$latestIndex - 5] } else { $null }
+        # 2026-08-11 バリュエーション評価(B.PEG)用: 前年(1年前)実績値。
+        # 「前年赤字→今期黒字」「前年利益が極端に小さい」等の異常な回復局面を
+        # 判定するための基準値であり、既存の3年/5年成長率計算には影響しない。
+        $base1 = if ($latestIndex -ge 1) { $financialRows[$latestIndex - 1] } else { $null }
 
         $latestSales = Normalize-Number (Get-Field $latest 1)
         $latestOperating = Normalize-Number (Get-Field $latest 2)
         $latestOrdinary = Normalize-Number (Get-Field $latest 3)
         $latestNetIncome = Normalize-Number (Get-Field $latest 4)
+        $latestEps = Normalize-Number (Get-Field $latest 5)
         $base3Sales = if ($base3) { Normalize-Number (Get-Field $base3 1) } else { $null }
         $base3Operating = if ($base3) { Normalize-Number (Get-Field $base3 2) } else { $null }
         $base3Ordinary = if ($base3) { Normalize-Number (Get-Field $base3 3) } else { $null }
@@ -165,6 +189,7 @@ foreach ($target in $targets) {
         $base5Operating = if ($base5) { Normalize-Number (Get-Field $base5 2) } else { $null }
         $base5Ordinary = if ($base5) { Normalize-Number (Get-Field $base5 3) } else { $null }
         $base5NetIncome = if ($base5) { Normalize-Number (Get-Field $base5 4) } else { $null }
+        $base1Ordinary = if ($base1) { Normalize-Number (Get-Field $base1 3) } else { $null }
 
         $roe = Get-FirstRegexNumber $text @("実績ROE\s*([\-0-9.,]+)\s*%", "ROE\s*\(実\)\s*([\-0-9.,]+)\s*%")
         $roic = Get-FirstRegexNumber $text @("ROIC\s*([\-0-9.,]+)\s*%", "ROIC\s*\(実\)\s*([\-0-9.,]+)\s*%")
@@ -178,6 +203,31 @@ foreach ($target in $targets) {
         $currentPrice = Get-FirstRegexNumber $text @("現在値\s*([\-0-9.,]+)\s*円")
         $priceAsOfMatch = [regex]::Match($text, "現在値\s*[\-0-9.,]+\s*円\(([^)]+)\)")
         $priceAsOf = if ($priceAsOfMatch.Success) { $priceAsOfMatch.Groups[1].Value.Trim() } else { "" }
+
+        # 2026-08-11 バリュエーション評価追加: PER/PBR/EV_EBITDA等はparse_financials_extended.ps1が
+        # 生成済みのlatest_indicators.csvから読み込む(raw.txtの再regexは行わない=抽出元の一本化)。
+        $extendedRow = Get-LatestIndicatorsRow $code $ExtendedDir
+        $perForecast = if ($extendedRow) { Normalize-Number ([string]$extendedRow."PER予想") } else { $null }
+        $perRel2y = if ($extendedRow) { Normalize-Number ([string]$extendedRow."PER相対水準2年") } else { $null }
+        $perRel5y = if ($extendedRow) { Normalize-Number ([string]$extendedRow."PER相対水準5年") } else { $null }
+        $pbr = if ($extendedRow) { Normalize-Number ([string]$extendedRow."PBR") } else { $null }
+        $pbrRel2y = if ($extendedRow) { Normalize-Number ([string]$extendedRow."PBR相対水準2年") } else { $null }
+        $pbrRel5y = if ($extendedRow) { Normalize-Number ([string]$extendedRow."PBR相対水準5年") } else { $null }
+        $evEbitda = if ($extendedRow) { Normalize-Number ([string]$extendedRow."EV_EBITDA") } else { $null }
+        $pegMonex = if ($extendedRow) { Normalize-Number ([string]$extendedRow."予想PEGレシオ") } else { $null }
+        $week52 = if ($extendedRow) { Normalize-Number ([string]$extendedRow."52週株価水準") } else { $null }
+        $targetPriceAbs = if ($extendedRow) { Normalize-Number ([string]$extendedRow."目標株価") } else { $null }
+
+        # B.PEG用: 予想EPS成長率(会社予想EPS ÷ 直近実績EPS)。eps_forecast.csvも
+        # parse_financials_extended.ps1が生成する既存ファイルを読むのみで、独自regexは追加しない。
+        $epsForecastPath = Join-Path $ExtendedDir "$code`_eps_forecast.csv"
+        $epsForecastNext = $null
+        if (Test-Path -LiteralPath $epsForecastPath) {
+            $epsForecastRows = @(Import-Csv -LiteralPath $epsForecastPath -Encoding UTF8)
+            if ($epsForecastRows.Count -gt 0) { $epsForecastNext = Normalize-Number ([string]$epsForecastRows[0]."EPS予想") }
+        }
+
+        $ordinaryConsensusGrowth = Get-OrdinaryIncomeConsensusGrowth $text
 
         $resolvedName = Get-CompanyName $code $text $htmlPath
         if ([string]::IsNullOrWhiteSpace($resolvedName)) { $resolvedName = $targetName }
@@ -216,6 +266,21 @@ foreach ($target in $targets) {
             dividend_increase_years = Format-Number $dividendIncreaseYears 0
             "黒字継続年数" = Format-Number $profitStreakYears 0
             forecast_loss = if (Test-ForecastLoss $text) { "TRUE" } else { "FALSE" }
+            per_forecast = Format-Number $perForecast
+            per_relative_2y = Format-Number $perRel2y
+            per_relative_5y = Format-Number $perRel5y
+            pbr = Format-Number $pbr
+            pbr_relative_2y = Format-Number $pbrRel2y
+            pbr_relative_5y = Format-Number $pbrRel5y
+            ev_ebitda = Format-Number $evEbitda
+            peg_monex = Format-Number $pegMonex
+            week52_level = Format-Number $week52
+            target_price = Format-Number $targetPriceAbs 0
+            eps_actual_latest = Format-Number $latestEps
+            eps_forecast_next = Format-Number $epsForecastNext
+            ordinary_income_actual_latest = Format-Number $latestOrdinary
+            ordinary_income_actual_prev_year = Format-Number $base1Ordinary
+            ordinary_income_consensus_growth = Format-Number $ordinaryConsensusGrowth
             fetched_at = $metadataFetchedAt
             data_as_of = $metadataDataAsOf
             source_update_date = $metadataSourceUpdateDate
