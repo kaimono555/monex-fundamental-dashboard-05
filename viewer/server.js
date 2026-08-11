@@ -703,6 +703,66 @@ function load09Holdings() {
   } catch { return null; }
 }
 
+// {file}内のcode列がcodeと一致する行を削除する。ヘッダーの列順は維持する。
+// 対象行が無い/ファイルが無い場合はfalseを返す（何もしない）。
+function removeCsvRowByCode(file, code) {
+  if (!fs.existsSync(file)) return false;
+  const rows = parseCsv(fs.readFileSync(file, "utf8"));
+  if (rows.length < 1) return false;
+  const header = rows[0];
+  const codeIdx = header.indexOf("code");
+  if (codeIdx < 0) return false;
+  const before = rows.length - 1;
+  const kept = rows.slice(1).filter(r => r[codeIdx] !== code);
+  if (kept.length === before) return false;
+  const objs = kept.map(r => {
+    const o = {};
+    header.forEach((h, i) => { o[h] = r[i] !== undefined ? r[i] : ""; });
+    return o;
+  });
+  fs.writeFileSync(file, toCsv(header, objs), "utf8");
+  return true;
+}
+
+function removeFileIfExists(p) {
+  if (fs.existsSync(p)) { fs.unlinkSync(p); return true; }
+  return false;
+}
+
+function removeGlobPrefix(dir, prefix) {
+  if (!fs.existsSync(dir)) return 0;
+  let n = 0;
+  for (const f of fs.readdirSync(dir)) {
+    if (f.startsWith(prefix)) { fs.unlinkSync(path.join(dir, f)); n++; }
+  }
+  return n;
+}
+
+// 銘柄の完全削除: 一覧表示元CSV（fundamental_scores/fundamentals/fetch_results/
+// fetch_status/manual_fundamentals/manual_names）の該当行と、取得済みキャッシュ
+// （output/output_extended/raw）を削除する。data/target_codes.csv（04由来の
+// 取得対象リスト、および09保有銘柄の追記分）はここでは変更しない。そのため、
+// 対象コードが引き続き取得対象であれば次回の自動取り込みで再取得され一覧に戻る。
+async function apiDeleteStock(req, res) {
+  const body = JSON.parse(await readBody(req) || "{}");
+  const code = safeCode(String(body.code || ""));
+  if (!code) return sendJson(res, 400, { error: "invalid code" });
+
+  const removed = {
+    fundamental_scores: removeCsvRowByCode(path.join(DATA_DIR, "fundamental_scores.csv"), code),
+    fundamentals: removeCsvRowByCode(path.join(DATA_DIR, "fundamentals.csv"), code),
+    fetch_results: removeCsvRowByCode(path.join(DATA_DIR, "fetch_results.csv"), code),
+    fetch_status: removeCsvRowByCode(path.join(DATA_DIR, "fetch_status.csv"), code),
+    manual_fundamentals: removeCsvRowByCode(path.join(DATA_DIR, "manual_fundamentals.csv"), code),
+    manual_names: removeCsvRowByCode(path.join(DATA_DIR, "manual_names.csv"), code),
+    financials_csv: removeFileIfExists(path.join(DATA_DIR, "output", `${code}_financials.csv`)),
+    output_extended_files: removeGlobPrefix(path.join(DATA_DIR, "output_extended"), `${code}_`),
+    raw_html: removeFileIfExists(path.join(DATA_DIR, "raw", `${code}.html`)),
+    raw_txt: removeFileIfExists(path.join(DATA_DIR, "raw", `${code}.txt`)),
+  };
+  sendJson(res, 200, { code, removed });
+}
+
 function apiStocks(res) {
   const scores = csvToObjects(path.join(DATA_DIR, "fundamental_scores.csv")) || [];
   const funds = csvToObjects(path.join(DATA_DIR, "fundamentals.csv")) || [];
@@ -987,6 +1047,9 @@ const server = http.createServer((req, res) => {
       return apiManual(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
     }
     if (u.pathname === "/api/stocks") return apiStocks(res);
+    if (u.pathname === "/api/delete-stock" && req.method === "POST") {
+      return apiDeleteStock(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
+    }
     const ms = u.pathname.match(/^\/api\/source\/([^/]+)$/);
     if (ms) {
       const code = safeCode(ms[1]);

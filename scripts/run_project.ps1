@@ -31,6 +31,73 @@ function Test-CodeListEqual([string[]]$Left, [string[]]$Right) {
     return $true
 }
 
+# 09_立花API 注文・保有管理ダッシュボード の auto_exit_state.json から
+# 保有中（holding_quantity > 0）の銘柄コードを読む。viewer/server.js の
+# load09Holdings() と同じ判定ロジック・同じデータ源に合わせている。
+function Get-Held09Codes([string]$DesktopDir) {
+    $result = @()
+    try {
+        $dir09 = Get-ChildItem -LiteralPath $DesktopDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "09_*" } | Select-Object -First 1
+        if (-not $dir09) { return $result }
+        $statePath = Join-Path $dir09.FullName "runtime\auto_exit\auto_exit_state.json"
+        if (-not (Test-Path -LiteralPath $statePath)) { return $result }
+        $json = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($prop in $json.PSObject.Properties) {
+            $v = $prop.Value
+            $qty = 0.0
+            if ($null -ne $v.holding_quantity) { $qty = [double]$v.holding_quantity }
+            elseif ($null -ne $v.quantity) { $qty = [double]$v.quantity }
+            if ($qty -gt 0) { $result += [string]$prop.Name }
+        }
+    } catch {
+        Write-Host "  [warn] 09保有銘柄の読み込みに失敗しました: $($_.Exception.Message)"
+    }
+    return $result
+}
+
+# target_codes.csv（04由来）に無い09保有銘柄を末尾に追記する。
+# 04 follow_candidates.csv との突合チェック（コード集合完全一致）はこの
+# 追記の「前」に行うため、既存の安全ガードはそのまま維持される。
+function Add-Held09CodesToTargetCodes {
+    param(
+        [string]$ProjectRoot,
+        [string]$TargetCodesPath,
+        [string[]]$TargetSet,
+        [string[]]$HeldCodes
+    )
+    $missing = @($HeldCodes | Sort-Object -Unique | Where-Object { $_ -notin $TargetSet })
+    if ($missing.Count -eq 0) {
+        Write-Host "09保有銘柄はすべて04候補に含まれているため、target_codes.csvへの追記はありません。"
+        return
+    }
+    Write-Host "09保有銘柄のうち04候補に無いコードを target_codes.csv に追記します: $($missing -join ',')"
+
+    $manualNamesPath = Join-Path $ProjectRoot "data\manual_names.csv"
+    $manualNameMap = @{}
+    if (Test-Path -LiteralPath $manualNamesPath) {
+        foreach ($row in @(Import-Csv -LiteralPath $manualNamesPath -Encoding UTF8)) {
+            $manualNameMap[[string]$row.code] = [string]$row.name
+        }
+    }
+
+    $existingRows = @(Import-Csv -LiteralPath $TargetCodesPath -Encoding UTF8)
+    $newRows = @($missing | ForEach-Object {
+        $name = if ($manualNameMap.ContainsKey($_)) { $manualNameMap[$_] } else { "" }
+        [pscustomobject]@{ code = $_; name = $name }
+    })
+    $allRows = @($existingRows) + $newRows
+
+    $utf8Bom = [System.Text.UTF8Encoding]::new($true)
+    $tempPath = [System.IO.Path]::GetTempFileName()
+    $allRows | Export-Csv -LiteralPath $tempPath -NoTypeInformation -Encoding UTF8
+    $csvText = [System.IO.File]::ReadAllText($tempPath, [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($TargetCodesPath, $csvText, $utf8Bom)
+    Remove-Item -LiteralPath $tempPath -Force
+
+    Write-Host "target_codes.csv 追記後の件数: $($allRows.Count)（04由来=$($existingRows.Count) + 09保有追加=$($newRows.Count)）"
+}
+
 Push-Location $ProjectRoot
 try {
     $StartedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -73,6 +140,9 @@ try {
     if (-not (Test-CodeListEqual $SourceCodes $TargetCodes)) {
         Write-Host "04と05のコード集合は一致していますが、CSV順は04 follow_candidates.csv を基準に確認済みです。"
     }
+
+    $Held09Codes = @(Get-Held09Codes $DesktopDir)
+    Add-Held09CodesToTargetCodes -ProjectRoot $ProjectRoot -TargetCodesPath $TargetCodesPath -TargetSet $TargetSet -HeldCodes $Held09Codes
 
     & (Join-Path $ScriptDir "fetch_target_financials.ps1")
     & (Join-Path $ScriptDir "generate_fundamentals.ps1")

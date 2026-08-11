@@ -58,9 +58,32 @@
         <td>${r.equity_ratio !== "" ? r.equity_ratio + "%" : "-"}</td>
         <td class="l">${r.data_as_of}</td>
         <td class="l">${r.fetched_at}</td>
+        <td><button type="button" class="del-btn" data-code="${r.code}" data-name="${(r.name || "").replace(/"/g, "&quot;")}">削除</button></td>
       </tr>`).join("");
     document.getElementById("count").textContent = `${view.length} / ${rows.length} 銘柄`;
   }
+
+  tbody.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".del-btn");
+    if (!btn) return;
+    const code = btn.dataset.code;
+    const name = btn.dataset.name || "";
+    if (!confirm(`${code} ${name} を一覧・取得データごと削除しますか？\n（取得対象（target_codes.csv）に残っている銘柄は、次回の自動取り込みで再取得され一覧に戻ります）`)) return;
+    btn.disabled = true;
+    try {
+      const res = await fetch("/api/delete-stock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await loadData();
+      render();
+    } catch (err) {
+      alert(`削除に失敗しました: ${err.message}`);
+      btn.disabled = false;
+    }
+  });
 
   document.querySelectorAll("#tbl th").forEach(th => {
     th.addEventListener("click", () => {
