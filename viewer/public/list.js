@@ -28,6 +28,7 @@
     fetched_at: s.fetched_at || "",
     watch09: !!s.watch09,   // 09の自動決済監視に登録あり
     holding: !!s.holding,   // うち保有中（数量>0）
+    fallback_used: !!s.fallback_used, // 今回の最新取得に失敗し、前回データを使用中
   });
 
   const tbody = document.querySelector("#tbl tbody");
@@ -47,7 +48,7 @@
       <tr>
         <td>${r.rankLabel}</td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.code}</a></td>
-        <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.name}</a>${r.watch09 ? `<span class="hold-badge ${r.holding ? "hold" : "watch"}">${r.holding ? "保有" : "監視"}</span>` : ""}</td>
+        <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.name}</a>${r.watch09 ? `<span class="hold-badge ${r.holding ? "hold" : "watch"}">${r.holding ? "保有" : "監視"}</span>` : ""}${r.fallback_used ? `<span class="hold-badge fallback" title="最新取得に失敗し、前回データを表示中">再取得待ち</span>` : ""}</td>
         <td title="${r.price_as_of}">${r.current_price ? r.current_price.toLocaleString("ja-JP") + "円" : "-"}</td>
         <td><span class="rank-${r.quality_rank}">${r.quality_rank}</span></td>
         <td>${r.quality_score}</td>

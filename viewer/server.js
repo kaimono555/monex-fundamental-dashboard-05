@@ -792,6 +792,18 @@ function apiStocks(res) {
     };
   });
 
+  // フォールバックデータ（今回の最新取得に失敗し、前回データを使った銘柄）も一覧に載せる。
+  // fundamental_scores.csv には入らない（generate_fundamental_scores.ps1 が latest のみに絞るため）
+  // fundamental_scores_fallback_only.csv 側に銘柄名・株価・決算期・スコアが揃っているので、
+  // そちらを使う（「手動追加」スキャンだと output CSV が古いままでデータが欠けるため）。
+  const known0 = new Set(list.map(s => s.code));
+  const fallbackScores = csvToObjects(path.join(DATA_DIR, "fundamental_scores_fallback_only.csv")) || [];
+  for (const s of fallbackScores) {
+    if (known0.has(s.code)) continue;
+    known0.add(s.code);
+    list.push({ ...s, rank: "", fallback_used: true, fundamentals: fmap.get(s.code) || null });
+  }
+
   // 手動追加分（financials CSVはあるがスコア一覧に無い銘柄）も一覧に載せる
   const known = new Set(list.map(s => s.code));
   const manualNames = new Map((csvToObjects(path.join(DATA_DIR, "manual_names.csv")) || []).map(r => [r.code, r.name]));

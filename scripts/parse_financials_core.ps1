@@ -45,7 +45,10 @@ $script:AnnualHeaderAliases = @{
     "BPS"      = "bps"
 }
 $script:AnnualRequiredKeys = @("period", "sales", "op", "ordinary", "net")
-$script:AnnualIgnorableHeaders = @("(前期比)", "前期比", "(前年比)", "前年比", "発表日")
+# 2026-08-11: 一部銘柄（7826等）で「売上原価・売上総利益・販売管理費・EBITDA」列を含む
+# 拡張レイアウトが返り、未知見出しとして表全体がPARSER_SCHEMA_MISMATCHになっていたため追加。
+# 値は使わない（既存の決算期/売上高/営業利益/経常利益/当期利益/EPS/BPS抽出には影響しない）。
+$script:AnnualIgnorableHeaders = @("(前期比)", "前期比", "(前年比)", "前年比", "発表日", "売上原価", "売上総利益", "販売管理費", "EBITDA")
 $script:QuarterlyMarkerHeaders = @("区分")
 
 # キャッシュフロー推移テーブルの見出し辞書
