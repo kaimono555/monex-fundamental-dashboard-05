@@ -130,6 +130,15 @@ table.list tr:hover td { background: #fff8e0; }
 .rank-B { color: #1a5fb4; font-weight: bold; }
 .rank-C { color: var(--ink-2); }
 
+/* 列見出しの「スコア計算方法」説明ページへのリンク */
+table.list th .score-help {
+  display: inline-block; width: 14px; height: 14px; line-height: 14px;
+  border-radius: 50%; background: #eef2f7; border: 1px solid var(--border);
+  color: var(--ink-2); font-size: 10px; font-weight: normal; text-align: center;
+  margin-left: 3px; vertical-align: middle; cursor: pointer;
+}
+table.list th .score-help:hover { background: var(--brand-yellow); color: var(--brand-dark); text-decoration: none; }
+
 .ind-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px;
 }

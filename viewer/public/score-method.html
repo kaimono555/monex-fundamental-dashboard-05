@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スコア計算方法 | 05 ローカルビューア</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .doc-page .wrap { max-width: 980px; }
+  .doc-page h1 { font-size: 20px; margin: 18px 0 4px; }
+  .doc-page .lead { color: var(--ink-2); font-size: 12px; margin-bottom: 16px; }
+  .doc-page .toc { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+  .doc-page .toc a {
+    font-size: 12px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 14px;
+    background: #fff; color: var(--ink-2);
+  }
+  .doc-page .toc a:hover { background: #fff8e0; text-decoration: none; }
+  .doc-page section { scroll-margin-top: 10px; }
+  .doc-page .totop { font-size: 11px; color: var(--ink-3); display: block; margin-top: 10px; }
+  .breakdown {
+    display: flex; flex-direction: column; gap: 2px; font-size: 13px;
+    background: #f9f8f4; border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 14px; max-width: 320px; margin: 10px 0;
+  }
+  .breakdown .row { display: flex; justify-content: space-between; }
+  .breakdown .row.total { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; font-weight: bold; }
+  .code-src { font-size: 11px; color: var(--ink-3); margin-top: 6px; }
+  .code-src code { background: #f4f2ec; padding: 1px 4px; border-radius: 3px; }
+  .note-box {
+    font-size: 12px; background: #eef6f2; border: 1px solid #b6dfc0; border-radius: 4px;
+    padding: 8px 12px; margin: 10px 0; color: #1d5a34;
+  }
+  .warn-box {
+    font-size: 12px; background: #fdf1de; border: 1px solid #eed3a8; border-radius: 4px;
+    padding: 8px 12px; margin: 10px 0; color: #7a4e0f;
+  }
+</style>
+</head>
+<body class="doc-page">
+<div class="topbar">
+  <div class="logo">銘柄スカウター <small>05 ローカルビューア</small></div>
+  <div class="nav"><a href="index.html">← 銘柄一覧へ</a></div>
+</div>
+<div class="wrap">
+  <div id="top"></div>
+  <h1>05 銘柄スカウター スコア計算方法</h1>
+  <p class="lead">
+    このページは <code>scripts/generate_fundamental_scores.ps1</code>（自動取得）と
+    <code>viewer/server.js</code>（手動貼付。同一の閾値・計算式で実装）の現在のコードを
+    そのまま説明したものです。仕様の推測や過去バージョンの記述ではなく、実装コードが正です。
+  </p>
+
+  <div class="panel">
+    <div class="body">
+      <div class="breakdown">
+        <div class="row"><span>成長性</span><span>40点</span></div>
+        <div class="row"><span>収益性</span><span>20点</span></div>
+        <div class="row"><span>財務</span><span>20点</span></div>
+        <div class="row total"><span>企業品質（quality_score）</span><span>80点</span></div>
+      </div>
+      <div class="breakdown">
+        <div class="row"><span>企業品質（quality_score）</span><span>80点</span></div>
+        <div class="row"><span>割安度（valuation_score）</span><span>20点</span></div>
+        <div class="row total"><span>総合（total_score_100）</span><span>100点</span></div>
+      </div>
+      <p class="lead" style="margin-top:10px">
+        企業品質80点 = 成長性40 + 収益性20 + 財務20 − 欠損データペナルティ（後述、最大20点減点・下限0点）<br>
+        総合100点 = 企業品質（quality_score）80点満点 + 割安度（valuation_score）20点満点
+      </p>
+    </div>
+  </div>
+
+  <div class="toc">
+    <a href="#total-rank">総合ランク</a>
+    <a href="#total-score">総合100</a>
+    <a href="#growth">成長性40</a>
+    <a href="#profitability">収益性20</a>
+    <a href="#financial">財務20</a>
+    <a href="#valuation">割安20</a>
+  </div>
+
+  <!-- ============================================================ -->
+  <section class="panel" id="total-rank">
+    <h2>1. 総合ランク（total_rank_100）</h2>
+    <div class="body">
+      <p>一覧の「総合ランク」列は <code>total_score_100</code>（下記2.）を次の閾値でA〜Eに区分したものです。</p>
+      <table class="data">
+        <thead><tr><th>ランク</th><th>条件</th></tr></thead>
+        <tbody>
+          <tr><td class="l">A</td><td>85点以上</td></tr>
+          <tr><td class="l">B</td><td>70点以上85点未満</td></tr>
+          <tr><td class="l">C</td><td>55点以上70点未満</td></tr>
+          <tr><td class="l">D</td><td>40点以上55点未満</td></tr>
+          <tr><td class="l">E</td><td>40点未満</td></tr>
+        </tbody>
+      </table>
+      <p class="code-src">実装: <code>Get-TotalRank100</code>（generate_fundamental_scores.ps1）</p>
+
+      <h3 class="chart-title">total_score_100が算出できない場合</h3>
+      <p><code>valuation_status = insufficient_data</code>（下記6.のcoverage参照）の銘柄は
+        <code>total_score_100</code>・<code>total_rank_100</code>とも算出されず、一覧には「-」と表示されます。
+        データが少ないことを理由に自動的にE評価やランク最下位にすることはしていません。</p>
+
+      <div class="warn-box">
+        <b>旧ランク（quality_rank）との違い</b><br>
+        銘柄詳細ページの「旧品質ランク(80点)」＝<code>quality_rank</code>は、企業品質80点満点のみを
+        A(68点以上)〜E(32点未満)で区分した従来からのランクです（下記の閾値・強制ランク上限つき）。
+        <b>一覧の「総合ランク」列は<code>total_rank_100</code>（100点満点）であり、<code>quality_rank</code>とは別物です。</b>
+        また現在のコードでは、下で説明する「強制ランク上限（減益・赤字予想・自己資本比率30%未満などでA/BをCへ強制的に下げる仕組み）」は
+        <code>quality_rank</code>にのみ適用され、<code>total_rank_100</code>には適用されていません（<code>total_score_100</code>の数値のみで判定）。
+      </div>
+
+      <h3 class="chart-title">参考: 旧quality_rank（企業品質80点満点）の閾値</h3>
+      <table class="data">
+        <thead><tr><th>ランク</th><th>条件</th></tr></thead>
+        <tbody>
+          <tr><td class="l">A</td><td>68点以上（下記の条件に該当する場合はCへ強制変更）</td></tr>
+          <tr><td class="l">B</td><td>56点以上68点未満（同上）</td></tr>
+          <tr><td class="l">C</td><td>44点以上56点未満</td></tr>
+          <tr><td class="l">D</td><td>32点以上44点未満</td></tr>
+          <tr><td class="l">E</td><td>32点未満</td></tr>
+        </tbody>
+      </table>
+      <p>次のいずれかに該当する場合、A・Bランクは強制的にCへ引き下げられます（<code>rank_cap</code>）。</p>
+      <ul>
+        <li>営業利益5年成長率がマイナス</li>
+        <li>経常利益5年成長率がマイナス</li>
+        <li>自己資本比率が30%未満</li>
+        <li>会社側が赤字予想を発表している（forecast_loss）</li>
+      </ul>
+      <p class="code-src">実装: <code>Get-QualityRank</code> / <code>Limit-RankToC</code>（generate_fundamental_scores.ps1）</p>
+      <a class="totop" href="#top">↑ ページ上部へ戻る</a>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="panel" id="total-score">
+    <h2>2. 総合100（total_score_100）</h2>
+    <div class="body">
+      <div class="breakdown">
+        <div class="row"><span>成長性</span><span>40点</span></div>
+        <div class="row"><span>収益性</span><span>20点</span></div>
+        <div class="row"><span>財務</span><span>20点</span></div>
+        <div class="row"><span>割安度</span><span>20点</span></div>
+        <div class="row total"><span>総合</span><span>100点</span></div>
+      </div>
+      <p><code>total_score_100 = quality_score（企業品質80点満点） + valuation_score（割安度20点満点）</code></p>
+      <p>企業品質80点の内訳は「成長性40 + 収益性20 + 財務20 − 欠損データペナルティ」です
+        （各項目の詳細は3〜5章、割安度20点の詳細は6章を参照）。</p>
+
+      <h3 class="chart-title">欠損データペナルティ（企業品質80点側）</h3>
+      <p>成長性・収益性・財務で使う主要10項目
+        （売上高/営業利益/経常利益/当期利益の各5年成長率、ROE、ROIC、自己資本比率、有利子負債比率、営業利益率5年平均、黒字継続年数）のうち
+        値が取得できていない項目数 × 2点を、成長性+収益性+財務の合計から差し引きます（最大20点減点、0点が下限）。</p>
+      <p class="code-src">実装: <code>Get-MissingDataCount</code> / <code>$missingPenalty = min(20, 欠損数×2)</code>（generate_fundamental_scores.ps1）</p>
+
+      <h3 class="chart-title">total_score_100が算出されない条件</h3>
+      <p><code>valuation_status = insufficient_data</code>（割安度20点の評価可能項目が少なすぎる場合。6章参照）の銘柄は、
+        <code>valuation_score</code>が算出されないため<code>total_score_100</code>も算出しません。
+        <b>「割安度のデータが足りない＝割高（0点）」という扱いはしていません。</b>算出不能として一覧には「-」と表示します。</p>
+      <p class="code-src">実装: 380〜385行目付近（generate_fundamental_scores.ps1）</p>
+      <a class="totop" href="#top">↑ ページ上部へ戻る</a>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="panel" id="growth">
+    <h2>3. 成長性（40点満点）</h2>
+    <div class="body">
+      <p>4つの5年CAGR（年率換算成長率）指標を、それぞれ下表の段階に応じて配点し合計します（合計が40点を超える場合は40点で頭打ち）。</p>
+      <div class="tbl-scroll">
+      <table class="data">
+        <thead><tr><th class="l">指標</th><th>満点</th><th>20%以上</th><th>12%以上20%未満</th><th>7%以上12%未満</th><th>3%以上7%未満</th><th>0%以上3%未満</th><th>0%未満 or 欠損</th></tr></thead>
+        <tbody>
+          <tr><td class="l">売上高5年成長率</td><td>8点</td><td>8.0</td><td>6.4</td><td>4.8</td><td>3.2</td><td>1.6</td><td>0点</td></tr>
+          <tr><td class="l">営業利益5年成長率</td><td>12点</td><td>12.0</td><td>9.6</td><td>7.2</td><td>4.8</td><td>2.4</td><td>0点</td></tr>
+          <tr><td class="l">経常利益5年成長率</td><td>10点</td><td>10.0</td><td>8.0</td><td>6.0</td><td>4.0</td><td>2.0</td><td>0点</td></tr>
+          <tr><td class="l">当期利益5年成長率</td><td>10点</td><td>10.0</td><td>8.0</td><td>6.0</td><td>4.0</td><td>2.0</td><td>0点</td></tr>
+          <tr><td class="l"><b>合計（上限）</b></td><td><b>40点</b></td><td colspan="5"></td><td></td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>各指標が取得できない場合は、マイナス成長と同じ0点として扱われます（欠損だからといって加点も減点もしません。0点扱いです）。</p>
+      <p class="code-src">実装: <code>Get-GrowthScore</code> / <code>Get-GrowthMetricScore</code>（generate_fundamental_scores.ps1）。
+        各成長率自体は <code>scripts/generate_fundamentals.ps1</code> が直近実績と5年前実績からCAGR（年率換算）で算出しています。</p>
+      <a class="totop" href="#top">↑ ページ上部へ戻る</a>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="panel" id="profitability">
+    <h2>4. 収益性（20点満点）</h2>
+    <div class="body">
+      <p>ROE・ROIC・営業利益率（5年平均）の3指標を段階配点し合計します（合計が20点を超える場合は20点で頭打ち。3指標の満点合計もちょうど20点）。</p>
+      <div class="tbl-scroll">
+      <table class="data">
+        <thead><tr><th class="l">指標</th><th>満点</th><th>条件と点数</th></tr></thead>
+        <tbody>
+          <tr><td class="l">ROE（自己資本利益率）</td><td>7点</td><td>20%以上→7 / 15%以上→5 / 10%以上→4 / 5%以上→1 / 5%未満・欠損→0</td></tr>
+          <tr><td class="l">ROIC（投下資本利益率）</td><td>7点</td><td>15%以上→7 / 10%以上→5 / 7%以上→4 / 4%以上→1 / 4%未満・欠損→0</td></tr>
+          <tr><td class="l">営業利益率（5年平均）</td><td>6点</td><td>25%以上→6 / 15%以上→4 / 10%以上→3 / 5%以上→1 / 5%未満・欠損→0</td></tr>
+          <tr><td class="l"><b>合計</b></td><td><b>20点</b></td><td></td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="note-box">一覧の「ROE」列は、この収益性スコアで使っているROEの実測値そのものです。ROEは収益性スコアの構成要素でもあります。</div>
+      <p class="code-src">実装: <code>Get-ProfitabilityScore</code>（generate_fundamental_scores.ps1）</p>
+      <a class="totop" href="#top">↑ ページ上部へ戻る</a>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="panel" id="financial">
+    <h2>5. 財務（20点満点）</h2>
+    <div class="body">
+      <p>自己資本比率・有利子負債比率・黒字継続年数の3項目を採点し合計します（合計が20点を超える場合は20点で頭打ち。3項目の満点合計もちょうど20点）。</p>
+      <div class="tbl-scroll">
+      <table class="data">
+        <thead><tr><th class="l">項目</th><th>満点</th><th>条件と点数</th></tr></thead>
+        <tbody>
+          <tr><td class="l">自己資本比率</td><td>9点</td><td>70%以上→9 / 50%以上→7 / 30%以上→4 / 20%以上→1 / 20%未満・欠損→0</td></tr>
+          <tr><td class="l">有利子負債比率</td><td>6点</td><td>10%以下→6 / 30%以下→4 / 60%以下→2 / 60%超→0 / <b>欠損時は中立扱いで4点</b></td></tr>
+          <tr><td class="l">黒字継続年数</td><td>5点</td><td>10年以上→5 / 7年以上→4 / 5年以上→3 / 3年以上→1 / 3年未満・欠損→0</td></tr>
+          <tr><td class="l"><b>合計</b></td><td><b>20点</b></td><td></td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="note-box">自己資本比率は財務20点の中ですでに評価されています（一覧の「自己資本比率」列と同じ実測値を使用）。</div>
+      <div class="warn-box">
+        有利子負債比率だけは、他の項目と異なり「欠損＝0点」ではなく「欠損＝中立扱いで4点」になります
+        （6点満点中4点＝10%以下と30%以下の中間相当）。
+      </div>
+      <p>業種補正について: 銀行業等向けに <code>financial_industry_*</code>という別集計（ROE・営業利益率・黒字継続年数・増配年数を使う代替式）が
+        CSVに保存されていますが、これは04_強銘柄追随側が金融業向けに参照するための値であり、
+        <b>05の一覧・詳細に表示している「財務」スコア自体は業種に関わらず上表の同一計算式です</b>（銀行業でも自己資本比率・有利子負債比率で採点）。</p>
+      <p class="code-src">実装: <code>Get-FinancialScore</code>（generate_fundamental_scores.ps1）</p>
+      <a class="totop" href="#top">↑ ページ上部へ戻る</a>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="panel" id="valuation">
+    <h2>6. 割安度（valuation_score・20点満点）</h2>
+    <div class="body">
+      <p>PERやPBRの絶対水準だけで「安い＝加点、高い＝減点」と単純評価すると、高成長株・業績回復途上の銘柄・新規上場銘柄などを
+        不当に低評価してしまうため、5つの観点（A〜E）に分けて評価し、<b>取得できたデータの範囲内でのみ</b>採点します。</p>
+
+      <div class="breakdown">
+        <div class="row"><span>A. 自社過去PER相対評価</span><span>6点</span></div>
+        <div class="row"><span>B. 成長率調整PER（PEG）</span><span>5点</span></div>
+        <div class="row"><span>C. EV/EBITDA</span><span>4点</span></div>
+        <div class="row"><span>D. PBR × ROE</span><span>3点</span></div>
+        <div class="row"><span>E. 52週株価水準</span><span>2点</span></div>
+        <div class="row total"><span>合計</span><span>20点</span></div>
+      </div>
+
+      <h3 class="chart-title">A. 自社過去PER相対評価（6点）</h3>
+      <p>マネックス銘柄スカウターの「予想PER相対水準（2年）」「予想PER相対水準（5年）」を使います。
+        これは0〜100の数値で、<b>その銘柄自身の過去2年/5年のPERレンジの中で現在の予想PERがどの位置にあるか</b>を表します
+        （0＝自社の過去レンジで最も割安だった水準、100＝最も割高だった水準）。同業他社・業種平均との比較ではありません。</p>
+      <p>2年・5年の両方が取得できる場合は「5年水準×0.6 ＋ 2年水準×0.4」で統合し、5年をやや重視します。
+        どちらか一方のみ取得できる場合はその値をそのまま使います。両方とも欠損（新規上場銘柄など）の場合は<b>評価対象外</b>です。</p>
+      <table class="data">
+        <thead><tr><th>統合後の水準（0=最安値側〜100=最高値側）</th><th>点数</th></tr></thead>
+        <tbody>
+          <tr><td class="l">20以下</td><td>6点</td></tr>
+          <tr><td class="l">20超〜35以下</td><td>5点</td></tr>
+          <tr><td class="l">35超〜50以下</td><td>4点</td></tr>
+          <tr><td class="l">50超〜65以下</td><td>3点</td></tr>
+          <tr><td class="l">65超〜80以下</td><td>2点</td></tr>
+          <tr><td class="l">80超〜90以下</td><td>1点</td></tr>
+          <tr><td class="l">90超</td><td>0点</td></tr>
+        </tbody>
+      </table>
+      <p class="code-src">実装: <code>Get-ValuationA</code>（generate_fundamental_scores.ps1） / <code>valA</code>（viewer/server.js）</p>
+
+      <h3 class="chart-title">B. 成長率調整PER / PEG（5点）</h3>
+      <p><b>第一優先</b>: マネックス銘柄スカウターが計算済みの「予想PEGレシオ」がある場合はその値をそのまま使います。</p>
+      <p><b>欠損時のみ自前計算</b>: 予想PER（会社予想）が取得できている場合に限り、
+        <code>PEG = 予想PER ÷ 利益成長率</code> を計算します。利益成長率は次の優先順位で採用します。</p>
+      <ol>
+        <li>予想EPS成長率 ＝ (会社予想EPS − 直近実績EPS) ÷ 直近実績EPS。ただし直近実績EPSが黒字（0超）の場合のみ。</li>
+        <li>予想経常利益（コンセンサス）増益率。ただし前年の経常利益実績が黒字（0超）の場合のみ。</li>
+      </ol>
+      <div class="warn-box">
+        異常値対策: 成長率が0%以下、または前年実績が赤字・存在しない場合は「PEGとして意味を持たない」として<b>評価対象外</b>にします
+        （0点にはしません）。成長率が200%を超える場合も、前年比数百〜数千%という極端な回復局面（例: 前年の利益水準が
+        極端に小さい）とみなして<b>評価対象外</b>にします。<br>
+        成長率が0%超200%以下の場合のみ採用し、そのうえで60%を上限にクリップしてPEGの分母に使います
+        （例: 実成長率55%→55のまま使用、120%→60に切り下げて使用）。
+      </div>
+      <table class="data">
+        <thead><tr><th>PEG</th><th>点数</th></tr></thead>
+        <tbody>
+          <tr><td class="l">0.7以下</td><td>5点</td></tr>
+          <tr><td class="l">0.7超〜1.0以下</td><td>4点</td></tr>
+          <tr><td class="l">1.0超〜1.5以下</td><td>3点</td></tr>
+          <tr><td class="l">1.5超〜2.0以下</td><td>2点</td></tr>
+          <tr><td class="l">2.0超〜2.5以下</td><td>1点</td></tr>
+          <tr><td class="l">2.5超</td><td>0点</td></tr>
+        </tbody>
+      </table>
+      <p>予想PER自体が欠損している銘柄では、無理に自前PEGを計算せず<b>評価対象外</b>とします。</p>
+      <p class="code-src">実装: <code>Get-ValuationB</code> / <code>Get-GrowthForPeg</code>（generate_fundamental_scores.ps1） /
+        <code>valB</code> / <code>growthForPeg</code>（viewer/server.js）</p>
+
+      <h3 class="chart-title">C. EV/EBITDA（4点）</h3>
+      <p>同業・業種平均のEV/EBITDAは現状取得できないため、絶対水準（実データ68銘柄の四分位）で採点します。EV/EBITDAが取得できない銘柄（金融業など）は<b>評価対象外</b>です。</p>
+      <table class="data">
+        <thead><tr><th>EV/EBITDA（倍）</th><th>点数</th></tr></thead>
+        <tbody>
+          <tr><td class="l">10.8以下</td><td>4点</td></tr>
+          <tr><td class="l">10.8超〜13.2以下</td><td>3点</td></tr>
+          <tr><td class="l">13.2超〜22.9以下</td><td>2点</td></tr>
+          <tr><td class="l">22.9超〜32.8以下</td><td>1点</td></tr>
+          <tr><td class="l">32.8超</td><td>0点</td></tr>
+        </tbody>
+      </table>
+      <p class="code-src">実装: <code>Get-ValuationC</code>（generate_fundamental_scores.ps1） / <code>valC</code>（viewer/server.js）</p>
+
+      <h3 class="chart-title">D. PBR × ROE（3点）</h3>
+      <p><code>pbr_roe_ratio = PBR ÷ ROE(%)</code> を計算します。高ROE企業は高PBRでも正当化されるため、PBR単独では判定しません。
+        <b>ROEが0以下（赤字）の場合はこの指標が数学的に意味を持たないため評価対象外とし、0点にはしません。</b>
+        PBRが取得できない場合も評価対象外です。</p>
+      <table class="data">
+        <thead><tr><th>PBR ÷ ROE</th><th>点数</th></tr></thead>
+        <tbody>
+          <tr><td class="l">0.152以下</td><td>3点</td></tr>
+          <tr><td class="l">0.152超〜0.212以下</td><td>2点</td></tr>
+          <tr><td class="l">0.212超〜0.347以下</td><td>1点</td></tr>
+          <tr><td class="l">0.347超</td><td>0点</td></tr>
+        </tbody>
+      </table>
+      <p class="code-src">実装: <code>Get-ValuationD</code>（generate_fundamental_scores.ps1） / <code>valD</code>（viewer/server.js）</p>
+
+      <h3 class="chart-title">E. 52週株価水準（2点）</h3>
+      <p>0〜100の水準（52週高値・安値の中で現在株価がどの位置にあるか。低いほど52週安値に近い＝割安方向）を、補助的に採点します。
+        企業価値そのものではなく株価の位置にすぎないため配点は2点のみです。全銘柄で取得できています。</p>
+      <table class="data">
+        <thead><tr><th>52週株価水準</th><th>点数</th></tr></thead>
+        <tbody>
+          <tr><td class="l">41.4以下</td><td>2点</td></tr>
+          <tr><td class="l">41.4超〜75.6以下</td><td>1点</td></tr>
+          <tr><td class="l">75.6超</td><td>0点</td></tr>
+        </tbody>
+      </table>
+      <p class="code-src">実装: <code>Get-ValuationE</code>（generate_fundamental_scores.ps1） / <code>valE</code>（viewer/server.js）</p>
+
+      <h3 class="chart-title">データが少ない銘柄の扱い（valuation_coverage）</h3>
+      <p>A〜Eのうち評価対象外（データ欠損）の項目は、20点の分母からも除外します。「データがない＝割高として0点」にはしません。</p>
+      <div class="breakdown" style="max-width:420px">
+        <div class="row"><span>評価可能項目の満点合計</span><span>available_max_score</span></div>
+        <div class="row"><span>実際の獲得点</span><span>earned_score</span></div>
+        <div class="row total"><span>割安度20点</span><span>earned_score ÷ available_max_score × 20</span></div>
+      </div>
+      <p>ただし <code>available_max_score</code> が9点未満の場合は、根拠として不十分（＝評価不足）とみなし、
+        <code>valuation_score</code>そのものを算出しません（0点にもしません）。</p>
+      <table class="data">
+        <thead><tr><th class="l">coverage（=available_max_score ÷ 20）</th><th>valuation_status</th><th>意味</th></tr></thead>
+        <tbody>
+          <tr><td class="l">70%以上</td><td>normal</td><td>十分なデータで算出</td></tr>
+          <tr><td class="l">45%以上70%未満</td><td>reference</td><td>算出はするが参考値扱い</td></tr>
+          <tr><td class="l">45%未満（available_max_score が9点未満）</td><td>insufficient_data</td><td>算出しない（valuation_score・total_score_100ともN/A）</td></tr>
+        </tbody>
+      </table>
+      <p class="code-src">実装: <code>Get-ValuationResult</code>（generate_fundamental_scores.ps1） / <code>computeValuation</code>（viewer/server.js）</p>
+
+      <h3 class="chart-title">目標株価・目標株価乖離率について</h3>
+      <div class="note-box">
+        銘柄詳細ページに表示している目標株価・目標株価乖離率は<b>参考値</b>です。アナリスト予想は業績修正や株価上昇に
+        後追いすることがあり、これをそのまま加点すると循環参照的な評価になるため、<b>valuation_scoreの計算には一切使用していません</b>。
+      </div>
+      <a class="totop" href="#top">↑ ページ上部へ戻る</a>
+    </div>
+  </section>
+</div>
+</body>
+</html>
