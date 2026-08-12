@@ -661,14 +661,14 @@ async function main() {
       if (i < codes.length - 1) {
         const processedCount = i + 1;
         if (processedCount % 20 === 0) {
-          const breakMs = Math.round(randomBetween(20000, 30000));
+          const breakMs = Math.round(randomBetween(10000, 15000));
           writeRunLog(logPath, `${processedCount}銘柄処理完了`);
           writeRunLog(logPath, `休憩開始: ${Math.round(breakMs / 1000)}秒`);
           await sleep(breakMs);
           writeRunLog(logPath, "休憩終了");
           writeRunLog(logPath, "取得再開");
         } else {
-          const waitMs = randomBetween(3000, 5000);
+          const waitMs = randomBetween(1500, 2500);
           writeRunLog(logPath, `銘柄間ランダム待機: ${formatSeconds(waitMs)}秒`);
           await sleep(waitMs);
         }
