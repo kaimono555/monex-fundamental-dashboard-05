@@ -4,6 +4,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { spawn } = require("child_process");
 
 const PORT = 8055;
@@ -11,6 +12,9 @@ const HOST = "0.0.0.0";
 const ROOT = path.join(__dirname, "..");
 const DATA_DIR = path.join(ROOT, "data");
 const PUBLIC_DIR = path.join(__dirname, "public");
+// 108Phase2-B: 05・104-3が共通で参照するマネックス貼付原文の共有ストア(105/104-3どちらの
+// 加工ロジックも変更せず、原文保存先だけを共通化する。詳細は _shared_monex_raw/README.md)
+const SHARED_RAW_ROOT = path.join(ROOT, "..", "_shared_monex_raw");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -716,6 +720,45 @@ function mergeCsvByPeriod(file, cols, rows) {
   return { added, updated, total: merged.length, last: merged.length ? merged[merged.length - 1]["決算期"] : "" };
 }
 
+// 108Phase2-B: 貼付原文を _shared_monex_raw/{code}/ へ保存する。
+// 方針(2026-08-12追加指示): 1銘柄=最新RAW1件のみ保持。新しい貼付が来たら旧RAWファイルは削除し、
+// latest.jsonも最新内容へ置き換える(履歴配列は持たない)。104-3・108の過去レポート自体は
+// このフォルダの管理外なので削除しない(旧104-3はhash不一致からstale判定できるようにするだけ)。
+// 05・104-3の既存パーサー・スコア計算には一切関与しない、保存処理のみの追加。
+// 失敗しても05自身の保存・スコア反映は継続させるため、呼び出し側でtry/catchする。
+function saveSharedMonexRaw(code, name, text) {
+  const dir = path.join(SHARED_RAW_ROOT, code);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  // 旧RAWファイルを削除してから最新版のみを書く(latest.jsonは後述のとおり上書き)
+  for (const f of fs.readdirSync(dir)) {
+    if (/^\d[0-9A-Za-z]*_\d{8}_\d{6}\.txt$/.test(f)) {
+      try { fs.unlinkSync(path.join(dir, f)); } catch { /* 削除失敗は無視して続行 */ }
+    }
+  }
+
+  const capturedAt = nowLocal();
+  const fileStamp = capturedAt.replace(/[-:]/g, "").replace(" ", "_");
+  const rawFile = `${code}_${fileStamp}.txt`;
+  fs.writeFileSync(path.join(dir, rawFile), text, "utf8");
+
+  const priceMatch = text.match(/現在値\s*[\-0-9.,]+\s*円\(([^)]+)\)/);
+  const monexDataUpdatedAt = priceMatch ? priceMatch[1].trim() : null;
+  const rawTextHash = "sha256:" + crypto.createHash("sha256").update(text, "utf8").digest("hex");
+
+  const latest = {
+    stock_code: code,
+    stock_name: name || "",
+    source: "monex_stock_scout",
+    captured_at: capturedAt,
+    monex_data_updated_at: monexDataUpdatedAt,
+    raw_text_file: rawFile,
+    raw_text_hash: rawTextHash,
+  };
+  fs.writeFileSync(path.join(dir, "latest.json"), JSON.stringify(latest, null, 2), "utf8");
+  return latest;
+}
+
 async function apiManual(req, res) {
   const body = JSON.parse(await readBody(req) || "{}");
   const text = String(body.text || "");
@@ -734,6 +777,15 @@ async function apiManual(req, res) {
   const manualRawDir = path.join(DATA_DIR, "manual_raw");
   if (!fs.existsSync(manualRawDir)) fs.mkdirSync(manualRawDir, { recursive: true });
   fs.writeFileSync(path.join(manualRawDir, `${code}.txt`), text, "utf8");
+
+  // 108Phase2-B: 同じ貼付原文を共通RAW置き場へも保存（104-3・108が読み取り専用で参照する）。
+  // 失敗しても05自身の更新は継続する（共通化は補助機能であり05の主機能をブロックしない）。
+  let sharedRaw = null;
+  try {
+    sharedRaw = saveSharedMonexRaw(code, name, text);
+  } catch (e) {
+    console.error(`[shared_monex_raw] save failed for ${code}: ${e && e.message || e}`);
+  }
 
   const extDir = path.join(DATA_DIR, "output_extended");
   if (!fs.existsSync(extDir)) fs.mkdirSync(extDir, { recursive: true });
@@ -814,7 +866,10 @@ async function apiManual(req, res) {
     fs.writeFileSync(namesFile, toCsv(["code", "name"], [...m.entries()].map(([c, n]) => ({ code: c, name: n }))), "utf8");
   }
   sendJson(res, 200, { code, name, fin, cf, qtr, qtrCum, forecast: epsF.full.length,
-    indicators: indSaved, extras: extrasSaved, eps_forecast: epsRows.length, rows });
+    indicators: indSaved, extras: extrasSaved, eps_forecast: epsRows.length, rows,
+    shared_raw: sharedRaw ? { saved: true, captured_at: sharedRaw.captured_at,
+      raw_text_file: sharedRaw.raw_text_file, raw_text_hash: sharedRaw.raw_text_hash } :
+      { saved: false } });
 }
 
 function sendJson(res, status, obj) {
@@ -1272,4 +1327,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { computeValuation, computeQualityScore, buildManualScore };
+module.exports = { computeValuation, computeQualityScore, buildManualScore, saveSharedMonexRaw, apiManual };
