@@ -1,6 +1,11 @@
 ﻿const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { detectAuthErrorPage } = require("./auth_detect");
+
+// 108Phase2-B: 05・104-3が共通で参照するマネックス貼付原文の共有ストア。
+// viewer/server.js の saveSharedMonexRaw() と同じ保存先・仕様(1銘柄=最新RAW1件のみ)。
+const SHARED_RAW_ROOT = path.join(__dirname, "..", "..", "_shared_monex_raw");
 
 function parseArgs(argv) {
   const args = {};
@@ -28,6 +33,41 @@ function writeRunLog(logPath, message) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 108Phase2-B: 自動取得成功時の原文を _shared_monex_raw/{code}/ へ保存する。
+// viewer/server.js の saveSharedMonexRaw() と同じ仕様。05の既存パーサー・CSV出力には
+// 一切関与しない、保存処理のみの追加。失敗しても自動取得自体は継続させる(呼び出し側でtry/catch)。
+function saveSharedMonexRaw(code, name, text) {
+  const dir = path.join(SHARED_RAW_ROOT, code);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  for (const f of fs.readdirSync(dir)) {
+    if (/^\d[0-9A-Za-z]*_\d{8}_\d{6}\.txt$/.test(f)) {
+      try { fs.unlinkSync(path.join(dir, f)); } catch { /* 削除失敗は無視して続行 */ }
+    }
+  }
+
+  const capturedAt = nowTokyo();
+  const fileStamp = capturedAt.replace(/[-:]/g, "").replace(" ", "_");
+  const rawFile = `${code}_${fileStamp}.txt`;
+  fs.writeFileSync(path.join(dir, rawFile), text, "utf8");
+
+  const priceMatch = text.match(/現在値\s*[\-0-9.,]+\s*円\(([^)]+)\)/);
+  const monexDataUpdatedAt = priceMatch ? priceMatch[1].trim() : null;
+  const rawTextHash = "sha256:" + crypto.createHash("sha256").update(text, "utf8").digest("hex");
+
+  const latest = {
+    stock_code: code,
+    stock_name: name || "",
+    source: "monex_stock_scout",
+    captured_at: capturedAt,
+    monex_data_updated_at: monexDataUpdatedAt,
+    raw_text_file: rawFile,
+    raw_text_hash: rawTextHash,
+  };
+  fs.writeFileSync(path.join(dir, "latest.json"), JSON.stringify(latest, null, 2), "utf8");
+  return latest;
 }
 
 function withTimeout(promise, timeoutMs, label) {
@@ -288,6 +328,11 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
       const result = pageData.result;
       if (result.ok) {
         writeRunLog(logPath, `fetch success code=${code} metrics=${result.foundMetricLabels.join("|")} financialRows=${result.financialRowCount}`);
+        try {
+          saveSharedMonexRaw(code, "", pageData.text);
+        } catch (e) {
+          writeRunLog(logPath, `[shared_monex_raw] save failed code=${code} error=${e && e.message || e}`);
+        }
         await closePageQuietly(page);
         page = null;
         return {
