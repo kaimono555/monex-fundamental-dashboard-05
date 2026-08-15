@@ -109,6 +109,16 @@ function Show-LoginAlertIfNeeded {
 # 以下のいずれかを含むプロセスだけを対象にする：
 #   playwright-profile / monex-login-profile / 05_マネックス銘柄スカウター自動取得 / update_all_05
 # chrome.exe / node.exe を無条件に終了する実装は行わない。
+# 常時起動ブラウザ(CDPポート9222で開きっぱなし運用)が正常稼働中かを確認する(2026-08-15追加)。
+function Test-Monex05CdpAlive {
+    try {
+        $res = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        return ($res.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
 function Stop-Monex05StaleProcesses {
     $patterns = @(
         "playwright-profile",
@@ -121,9 +131,19 @@ function Stop-Monex05StaleProcesses {
     } catch {
         $procs = @()
     }
+    # 常時起動ブラウザ(CDPポート9222)が正常稼働中なら、chrome.exeは残存プロセスではなく
+    # 現役のログイン維持ブラウザ(とその子プロセス)のため終了しない(2026-08-15追加。
+    # 閉じるとマネックスの非永続Cookieが失われ再ログインが必要になる)。CDPが応答しない場合
+    # (クラッシュ等の真の残存)は従来どおり掃除し、その後の取得処理が新しい常時起動ブラウザを
+    # 自動起動する。node.exeの残存掃除は従来どおり行う。
+    $cdpAlive = Test-Monex05CdpAlive
+    if ($cdpAlive) {
+        Write-Host "  [cleanup] 常時起動ブラウザ(CDP:9222)が稼働中のためchrome.exeは終了対象から除外します" -ForegroundColor Gray
+    }
     foreach ($p in $procs) {
         $cmd = [string]$p.CommandLine
         if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+        if ($cdpAlive -and $p.Name -eq "chrome.exe") { continue }
         $isTarget = $false
         foreach ($pat in $patterns) {
             if ($cmd -like "*$pat*") { $isTarget = $true; break }
@@ -142,6 +162,11 @@ function Stop-Monex05StaleProcesses {
 function Remove-Monex05LockFiles {
     param([string]$ResolvedProfileDir)
     if ([string]::IsNullOrWhiteSpace($ResolvedProfileDir) -or -not (Test-Path -LiteralPath $ResolvedProfileDir)) { return }
+    # 常時起動ブラウザが稼働中はプロファイルを使用中のため、ロックファイルには触れない(2026-08-15追加)。
+    if (Test-Monex05CdpAlive) {
+        Write-Host "  [cleanup] 常時起動ブラウザ(CDP:9222)が稼働中のためロックファイル削除はスキップします" -ForegroundColor Gray
+        return
+    }
     $lockNames = @("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile")
     foreach ($name in $lockNames) {
         $lockPath = Join-Path $ResolvedProfileDir $name
