@@ -1,6 +1,7 @@
 ﻿const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { spawn: spawnProcess } = require("child_process");
 const { detectAuthErrorPage } = require("./auth_detect");
 
 // 108Phase2-B: 05・104-3が共通で参照するマネックス貼付原文の共有ストア。
@@ -498,6 +499,64 @@ async function waitForChromeProfileRelease(resolvedProfilePath, logPath) {
   throw new Error(`relogin_chrome_still_running: Chrome still using profile after ${timeoutMs / 1000}s`);
 }
 
+// 2026-08-15追加: ブラウザを閉じずに使い回す。
+// 正常終了(context.close())でブラウザを閉じると、マネックス側のセッションCookie
+// (PHPSESSID等、非永続Cookie)が次回起動時に復元されず再ログインが必要になる事象が
+// 実機で確認されたため、既存プロファイルはこの回避策を導入する。
+// 1) 既にこのポートでChromeが起動中(=前回以前から開きっぱなし)なら、CDP接続して使い回す。
+// 2) 起動していなければ、detached(このNodeプロセス終了後も生き続ける)なChromeプロセスを
+//    新規起動してCDP接続する。launchPersistentContext()は使わない(Playwrightが管理する
+//    子プロセスは起動元のNodeプロセス終了時に一緒に終了してしまい、開きっぱなしを維持できない)。
+const CDP_PORT = 9222;
+
+async function isCdpReachable(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`);
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function getOrCreateContext(chromium, userDataDir, chromeExecutable, logPath) {
+  if (await isCdpReachable(CDP_PORT)) {
+    writeRunLog(logPath, `既存ブラウザに接続します(開いたまま維持されていたブラウザを再利用) cdpPort=${CDP_PORT}`);
+    const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+    const context = browser.contexts()[0] || (await browser.newContext());
+    return { context, launchedFresh: false };
+  }
+
+  const resolvedUserDataDir = path.resolve(userDataDir);
+  await waitForChromeProfileRelease(resolvedUserDataDir, logPath);
+
+  writeRunLog(logPath, `既存ブラウザが見つからないため新規起動します(今回から開いたままにする) cdpPort=${CDP_PORT}`);
+  const execPath = chromeExecutable || chromium.executablePath();
+  const child = spawnProcess(execPath, [
+    `--user-data-dir=${resolvedUserDataDir}`,
+    `--remote-debugging-port=${CDP_PORT}`,
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--lang=ja-JP",
+    "about:blank"
+  ], { detached: true, stdio: "ignore" });
+  child.unref();
+
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    if (await isCdpReachable(CDP_PORT)) break;
+    await sleep(300);
+  }
+  if (!(await isCdpReachable(CDP_PORT))) {
+    throw new Error("新規Chromeプロセスの起動後もCDPエンドポイントに接続できませんでした。");
+  }
+
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+  const context = browser.contexts()[0] || (await browser.newContext());
+  return { context, launchedFresh: true };
+}
+
 function isOnExpectedScoutPage(currentUrl, code) {
   let parsed;
   try {
@@ -638,18 +697,8 @@ async function main() {
   }
 
   writeRunLog(logPath, `batch fetch start count=${codes.length} userDataDir=${userDataDir} resolvedUserDataDir=${resolvedUserDataDir}`);
-  await waitForChromeProfileRelease(resolvedUserDataDir, logPath);
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    executablePath: chromeExecutable,
-    headless: false,
-    locale: "ja-JP",
-    args: [
-      "--disable-background-networking",
-      "--disable-default-apps",
-      "--no-first-run",
-      "--no-default-browser-check"
-    ]
-  });
+  const { context, launchedFresh } = await getOrCreateContext(chromium, userDataDir, chromeExecutable, logPath);
+  writeRunLog(logPath, `context ready launchedFresh=${launchedFresh}`);
 
   const results = [];
   try {
@@ -720,7 +769,9 @@ async function main() {
       }
     }
   } finally {
-    await context.close();
+    // 2026-08-15追加: ブラウザは閉じない(開いたまま維持する)。閉じるとマネックス側の
+    // セッションCookieが次回起動時に復元されない事象が確認されたため。
+    writeRunLog(logPath, "batch fetch: ブラウザは閉じずに開いたままにします");
     writeCsv(resultsPath, results);
     const failures = results.filter((row) => row.fetch_status !== "success").map((row) => row.code);
     writeRunLog(logPath, `batch fetch end count=${codes.length} success=${results.length - failures.length} failures=${failures.join(",")}`);
