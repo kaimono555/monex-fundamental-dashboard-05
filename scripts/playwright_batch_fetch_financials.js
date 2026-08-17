@@ -523,7 +523,7 @@ async function getOrCreateContext(chromium, userDataDir, chromeExecutable, logPa
     writeRunLog(logPath, `既存ブラウザに接続します(開いたまま維持されていたブラウザを再利用) cdpPort=${CDP_PORT}`);
     const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     const context = browser.contexts()[0] || (await browser.newContext());
-    return { context, launchedFresh: false };
+    return { browser, context, launchedFresh: false };
   }
 
   const resolvedUserDataDir = path.resolve(userDataDir);
@@ -554,7 +554,7 @@ async function getOrCreateContext(chromium, userDataDir, chromeExecutable, logPa
 
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
   const context = browser.contexts()[0] || (await browser.newContext());
-  return { context, launchedFresh: true };
+  return { browser, context, launchedFresh: true };
 }
 
 function isOnExpectedScoutPage(currentUrl, code) {
@@ -697,7 +697,7 @@ async function main() {
   }
 
   writeRunLog(logPath, `batch fetch start count=${codes.length} userDataDir=${userDataDir} resolvedUserDataDir=${resolvedUserDataDir}`);
-  const { context, launchedFresh } = await getOrCreateContext(chromium, userDataDir, chromeExecutable, logPath);
+  const { browser, context, launchedFresh } = await getOrCreateContext(chromium, userDataDir, chromeExecutable, logPath);
   writeRunLog(logPath, `context ready launchedFresh=${launchedFresh}`);
 
   const results = [];
@@ -775,6 +775,17 @@ async function main() {
     writeCsv(resultsPath, results);
     const failures = results.filter((row) => row.fetch_status !== "success").map((row) => row.code);
     writeRunLog(logPath, `batch fetch end count=${codes.length} success=${results.length - failures.length} failures=${failures.join(",")}`);
+    // 2026-08-17追加: connectOverCDP()の接続を保持したままだとCDPのWebSocketが
+    // Nodeのイベントループを生存させ、取得成功時にプロセスが終了しない
+    // (親のPowerShellが待ち続け、generate以降が実行されない)。
+    // browser.close()は外部起動(detached)ChromeへのCDP接続では「切断」のみで、
+    // Chrome本体(CDP:9222)とログイン状態はそのまま残る。
+    try {
+      await browser.close();
+      writeRunLog(logPath, "batch fetch: CDP接続を切断しました(Chrome本体は開いたまま維持)");
+    } catch (error) {
+      writeRunLog(logPath, `batch fetch: CDP切断でエラー error=${error.message}`);
+    }
   }
 
   if (results.some((row) => row.fetch_status !== "success")) {
