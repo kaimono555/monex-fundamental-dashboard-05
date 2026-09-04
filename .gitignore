@@ -57,3 +57,12 @@ Desktop.ini
 __pycache__/
 *.pyc
 *.pyo
+
+# 共通RAW取得センター(2026-09-04): レジストリ本体・ビュー・ロック・一時取得・109向けニュースRAW
+data/stock_registry.sqlite3
+data/stock_registry.sqlite3-journal
+data/stock_registry_view.csv
+data/stock_registry_usage_view.csv
+data/locks/
+data/tmp_fetch/
+data/raw_topix/

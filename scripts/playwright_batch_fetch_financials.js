@@ -793,8 +793,30 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const args = parseArgs(process.argv.slice(2));
-  writeRunLog(args["log-path"] || "logs/run_log.txt", `batch fetch fatal error=${error.message}`);
-  process.exit(1);
-});
+// 2026-09-04 共通RAW取得センター化: 他スクリプト(validate_monex_raw.js /
+// playwright_fetch_monex_topix_news.js)が同じ判定・同じブラウザ接続処理を再利用できるよう
+// 関数をexportする。CLIとして直接実行された場合のみ main() を走らせる(挙動は従来どおり)。
+// 認証判定・取得ロジックを別ファイルへコピーして二重実装しないための最小リファクタ。
+module.exports = {
+  evaluateFinancialText,
+  extractSourceUpdateDate,
+  isOnExpectedScoutPage,
+  isFinancialScoutPageReady,
+  getOrCreateContext,
+  checkLoginReady,
+  waitForChromeProfileRelease,
+  isCdpReachable,
+  closePageQuietly,
+  writeRunLog,
+  nowTokyo,
+  saveSharedMonexRaw,
+  CDP_PORT
+};
+
+if (require.main === module) {
+  main().catch((error) => {
+    const args = parseArgs(process.argv.slice(2));
+    writeRunLog(args["log-path"] || "logs/run_log.txt", `batch fetch fatal error=${error.message}`);
+    process.exit(1);
+  });
+}

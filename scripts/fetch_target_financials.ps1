@@ -263,7 +263,20 @@ $nodeScript = Join-Path $PSScriptRoot "playwright_batch_fetch_financials.js"
 # Chromeを開いてログイン完了をポーリングで自動検出し（Enter入力は不要）、
 # 無人実行時（interactive=false）は待たずに即座に失敗する（exitCode=3）。
 # ログインが既に有効な場合はどちらのモードでも人間の操作なしにそのまま取得が始まる。
-$nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
+# 2026-09-04 共通RAW取得センター化: 05専用プロファイル(CDP:9222)を使う取得処理は、on-demand取得
+# (request_monex_raw.py)・109向けニュース取得と同じロック(data/locks/monex_fetch.lock)で直列化する。
+# 他Projectの要求が実行中なら最大15分待ち、それでも解放されなければ安全側に失敗する
+# (同じプロファイルをPlaywrightで二重に開かない。Stop-Monex05StaleProcessesは他の取得nodeも
+# 巻き込むため、ロック取得後にのみ実行される)。
+. (Join-Path $PSScriptRoot "monex_fetch_lock.ps1")
+$monexFetchLock = Acquire-MonexFetchLock -Owner "05_daily:fetch_target_financials" -WaitSec 900
+if ($monexFetchLock.WaitedSec -gt 0) { Write-RunLog "monex fetch lock acquired after waiting $($monexFetchLock.WaitedSec)s" }
+try {
+    $nodeExitCode = Invoke-BatchFetch -Codes $codes -NodeScript $nodeScript -ChromePath $chromePath
+}
+finally {
+    Release-MonexFetchLock $monexFetchLock
+}
 $fetchResults = @(Get-FetchResults)
 
 if ($nodeExitCode -eq 3) {

@@ -246,3 +246,92 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_monex_batch_with_login_
 | `feedback-wait-limits.md` | 待機上限・トラブルシュートの手順 |
 
 > 上記ファイルは `~/.claude/projects/.../memory/` に保存されています。
+
+---
+
+## 共通「銘柄スカウターRAW取得センター」（2026-09-04 追加）
+
+05は、05・109・104-3・111 が共通で使う **マネックス銘柄スカウターRAW取得の一元窓口** でもある。
+他Projectは原則として自分でマネックスを取得せず、05へ「この銘柄のRAWが必要」と依頼する。
+マネックスへのログイン・ブラウザ操作（CDP:9222 / `monex-login-profile`）・RAW保存・レジストリ更新は05が行う。
+
+### 設計原則
+
+* **「RAWを保存しているか」と「毎日更新するか」を分離する。** 一度取得した銘柄を永久にdaily対象に残さない。
+* 更新モードは3状態: `daily`（05日次で毎回取得）/ `on_demand`（依頼時のみ取得。日次に含めない）/
+  `inactive`（どのProjectも要求なし。日次取得しないが RAW・最終取得日時・過去利用Projectは残す）。
+* Project別の利用状態（`project_usage`）は独立。111がinactiveにしても109がon_demandならその銘柄はon_demandのまま。
+* 依頼時のデフォルトは必ず `on_demand`。**依頼しただけでdailyに昇格しない。**
+* 銘柄の「削除」と「日次更新停止」は同義にしない。inactiveでもRAWは削除しない（物理削除は別操作。
+  ビューアの「削除」ボタン `POST /api/delete-stock` は data/raw まで消すため、新管理方式では使わない）。
+
+### effective_update_mode の決定（優先順位）
+
+1. `pinned = 1` → daily
+2. いずれかのProjectが active かつ daily 要求 → daily
+3. いずれかのProjectが active かつ on_demand → on_demand
+4. それ以外 → inactive
+
+### レジストリ（SQLite・標準ライブラリのみ）
+
+| ファイル | 内容 |
+|---------|------|
+| `data/stock_registry.sqlite3` | 正本。`stocks`（code/name/pinned/effective_update_mode/raw_present/raw_path/raw_hash/last_fetch/fetch_status/data_as_of/last_error/created_at/updated_at）/ `project_usage`（code/project/active/requested_mode/last_required/reason/run_id/lease_expires_at）/ `fetch_log` |
+| `data/stock_registry_view.csv` / `data/stock_registry_usage_view.csv` | 人間確認用ビュー（書き出し専用。直接編集しない） |
+| `scripts/monex_registry.py` | レジストリモジュール兼CLI（`import-existing` / `show` / `list --mode` / `daily-codes` / `set-usage --project X --codes .. [--inactive]` / `pin` / `unpin` / `export-view` / `logs`） |
+
+レジストリへの書き込みは05側のスクリプト経由のみ（他ProjectがCSV/DBを直接書き換えない）。
+
+### 依頼インターフェース
+
+```powershell
+python scripts\request_monex_raw.py --project 111 --codes 5803,4062 --reason theme_analysis --run-id <run_id> --max-age-hours 24
+python scripts\request_monex_raw.py --project 109 --codes 8306 --page-type topix_news   # 業績ニュースページ(109向け)
+```
+
+フロー: レジストリ登録（on_demand）→ 既存RAWの有無・鮮度・本文検証 → 十分新しければ `fresh` で返却 →
+無い/古いものだけロック取得 → 既存 `playwright_batch_fetch_financials.js` を一時ディレクトリ
+（`data/tmp_fetch/{run_id}/`）向きに実行 → `validate_monex_raw.js`（auth_detect.js + evaluateFinancialText +
+銘柄コード一致 + 本文長）を通過したものだけ `data/raw/{code}.txt|.html` へ原子的に昇格（`fetched`）→
+レジストリ更新 → 結果JSON（stdout / `--json-out`）。終了コード 0=全件OK / 2=一部失敗 / 3=05ログイン更新が必要 / 4=ロック待ちタイムアウト / 1=致命的。
+
+**失敗時は前回正常RAW（last good RAW）を絶対に上書きしない**（`fetch_status=error` / `last_error` の更新のみ）。
+RAW保存先は従来どおり `data/raw/{code}.*`（05正本）と `_shared_monex_raw/{code}/`（共通・`saveSharedMonexRaw` が成功時に保存）。
+`--page-type topix_news` は `data/raw_topix/{code}.txt|.html|_news.json`（`scripts/playwright_fetch_monex_topix_news.js`）。
+
+### ロック（同時実行対策）
+
+`data/locks/monex_fetch.lock`（排他作成・JSON {pid, owner, started_at}・保持PID死亡/3時間超でstale奪取）。
+`scripts/monex_fetch_lock.py`（Python）と `scripts/monex_fetch_lock.ps1`（PowerShell）は同一プロトコル。
+05日次（`fetch_target_financials.ps1` の Invoke-BatchFetch）と on-demand 取得は同じロックで直列化し、
+同じChromeプロファイルをPlaywrightで二重に開かない。ロック待ち中に他要求が同一銘柄を取得済みなら再取得しない。
+
+### 05日次との互換（target_codes.csv 互換方式）
+
+`run_project.ps1` は従来どおり 04 → `target_codes.csv`（+09保有・手動貼付）で日次対象を決め、その直後に
+`scripts/registry_daily_sync.py` が (1) target の銘柄を project=05/daily としてレジストリへ反映、
+(2) target から外れた銘柄の05利用を inactive（RAW・他Project利用は保持）、(3) レジストリ上 daily
+（pinned / 他Projectのdaily要求）なのに target に無い銘柄だけ `source="registry"` で追記する。
+on_demand / inactive は絶対に追記しない。取得後は `--after-fetch` で `fetch_status.csv` を反映する。
+レジストリ側の失敗は日次処理を止めない（非致命）。
+
+### 他Projectからの利用
+
+| Project | 経路 | 旧経路（フォールバック・削除しない） |
+|---------|------|------|
+| 111 | `scripts/monex_center_111.py` → 05 request（project=`111/{theme}`）。分析後 `+10pt` 通過は on_demand 継続、それ以外は inactive | `monex_fetch_111.py --legacy`（`scripts_node/fetch_monex_111.js`、05のCDP:9222へ直接接続） |
+| 109 | `scripts/monex_scout_via_05.js` → 05 request（`topix_news`） | `monex_scout_client.js`（109専用ブラウザ CDP:9223）。`MONEX_SOURCE_109=legacy` で固定可 |
+| 104-3 | `handle_104_monex_fetch.ps1` → 05 request（project=104-3）→ `_shared_monex_raw` 読み戻し（従来どおり） | `scripts/monex/fetch_scouter_raw_104.js`（104-3専用ブラウザ CDP:9224）。`scripts/monex/USE_LEGACY_104_FETCH` マーカーで固定可 |
+
+### テスト
+
+```powershell
+python -m unittest tests.test_monex_registry tests.test_request_monex_raw tests.test_registry_daily_sync
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\test_parse_financials_headers.ps1
+```
+
+### ロールバック
+
+* `run_project.ps1` / `fetch_target_financials.ps1` の 2026-09-04 追記ブロック（registry_daily_sync 呼び出し・ロック）を外せば従来挙動に戻る。
+  レジストリ（`data/stock_registry.sqlite3`）は Git 管理外で、削除しても既存 CSV/RAW に影響しない。
+* 他Projectは上表の旧経路へ切り戻せる。

@@ -174,7 +174,28 @@ try {
     $ManualExtraCodes = @(Get-ManualExtraCodes $ProjectRoot)
     Add-ExtraCodesToTargetCodes -ProjectRoot $ProjectRoot -TargetCodesPath $TargetCodesPath -TargetSet $TargetSetAfter09 -ExtraCodes $ManualExtraCodes -SourceLabel "手動貼付追加銘柄" -SourceTag "manual"
 
+    # 2026-09-04 共通RAW取得センター化(Phase 1/6・互換方式):
+    # 確定した target_codes.csv を共通レジストリ(data/stock_registry.sqlite3)へ project=05/daily として反映し、
+    # レジストリ上 daily(pinned・他Projectのdaily要求)なのに target に無い銘柄だけを source="registry" で追記する。
+    # on_demand / inactive の銘柄は追加しない(日次対象が意図せず増えない)。
+    # レジストリ側の失敗は日次処理を止めない(非致命・警告のみ)。
+    try {
+        & python (Join-Path $ScriptDir "registry_daily_sync.py") --target-codes $TargetCodesPath
+        if ($LASTEXITCODE -ne 0) { Write-Host "  [warn] registry_daily_sync(before fetch) が非0終了しました(日次処理は継続) exitCode=$LASTEXITCODE" -ForegroundColor Yellow }
+    } catch {
+        Write-Host "  [warn] registry_daily_sync(before fetch) 例外(日次処理は継続): $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
     & (Join-Path $ScriptDir "fetch_target_financials.ps1")
+
+    # 取得結果(fetch_status.csv)をレジストリへ反映(失敗行はRAW情報を上書きしない)。非致命。
+    try {
+        & python (Join-Path $ScriptDir "registry_daily_sync.py") --after-fetch --fetch-status "data/fetch_status.csv"
+        if ($LASTEXITCODE -ne 0) { Write-Host "  [warn] registry_daily_sync(after fetch) が非0終了しました(日次処理は継続) exitCode=$LASTEXITCODE" -ForegroundColor Yellow }
+    } catch {
+        Write-Host "  [warn] registry_daily_sync(after fetch) 例外(日次処理は継続): $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
     & (Join-Path $ScriptDir "generate_fundamentals.ps1")
 
     $fetchStatuses = @(Import-Csv -LiteralPath "data/fetch_status.csv" -Encoding UTF8)
