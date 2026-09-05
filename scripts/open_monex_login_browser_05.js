@@ -48,9 +48,22 @@ async function main() {
     const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     const context = browser.contexts()[0];
     if (context) {
-      const page = await context.newPage();
-      await page.goto("https://www.monex.co.jp/", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
-      console.log("マネックストップページを新しいタブで開きました。");
+      // 2026-09-05: 既にマネックス系のタブ(monex.co.jp / ifis銘柄スカウター等)が
+      // 開いていれば、新しいタブを増やさずそのタブを前面に出すだけにする。
+      // (以前は常に公開トップページを新規タブで開いていたため、ログイン済みでも
+      //  公開ページのログイン欄が表示され「新たにログインページが開いた」ように
+      //  見えていた。104-3フォームの「マネックスログイン(05用)」ボタンからも
+      //  この経路が使われる。)
+      const existing = context.pages().find((p) => /monex\.co\.jp|monex\.ifis\.co\.jp/.test(p.url()));
+      if (existing) {
+        await existing.bringToFront().catch(() => {});
+        console.log(`既存のマネックスタブを前面に表示しました: ${existing.url()}`);
+        console.log("ログイン済みであればそのまま使えます。ログイン切れの場合はそのタブで再ログインしてください。");
+      } else {
+        const page = await context.newPage();
+        await page.goto("https://www.monex.co.jp/", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        console.log("マネックストップページを新しいタブで開きました。");
+      }
     }
     process.exit(0);
   }
