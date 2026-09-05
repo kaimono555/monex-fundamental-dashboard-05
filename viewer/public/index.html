@@ -13,19 +13,36 @@
 </div>
 <div class="wrap">
   <div class="ops-bar">
-    <button id="runUpdateBtn" type="button" title="所要時間の目安: 約17〜20分（直近実績: 68銘柄で約19分、セッション切れ時はログイン待ち時間が別途加算）">▶ 自動取り込みを実行（60銘柄）</button>
+    <button id="runUpdateBtn" type="button" title="所要時間の目安: 約17〜20分（直近実績: 68銘柄で約19分、セッション切れ時はログイン待ち時間が別途加算）">▶ 自動取り込みを実行（毎日更新対象を読み込み中…）</button>
     <span class="ops-status" id="opsStatus"><span class="dot idle"></span>停止中</span>
     <span class="muted">実行するとサーバーPC上でChrome・ダイアログが開きます（セッション切れ時はログイン誘導）</span>
     <button id="logToggleBtn" type="button" class="log-toggle">ログを隠す</button>
   </div>
   <pre id="logBox" class="log-box"></pre>
 
+  <div class="registry-summary" id="registrySummary"></div>
+
   <div class="search-row">
     <input id="q" type="search" placeholder="コード・銘柄名で絞り込み">
+    <select id="fProject" title="利用Projectで絞り込み">
+      <option value="">Project: 全て</option>
+    </select>
+    <select id="fMode" title="更新モードで絞り込み">
+      <option value="">更新: 全て</option>
+      <option value="daily">毎日</option>
+      <option value="on_demand">必要時</option>
+      <option value="inactive">停止</option>
+    </select>
+    <select id="fFetchStatus" title="取得状態で絞り込み">
+      <option value="">取得状態: 全て</option>
+      <option value="success">success</option>
+      <option value="error">error</option>
+      <option value="__none__">(未取得)</option>
+    </select>
     <span class="muted" id="count"></span>
   </div>
   <div class="panel">
-    <h2>銘柄一覧（fundamental_scores.csv）</h2>
+    <h2>銘柄一覧（共通RAW管理 ＋ fundamental_scores.csv）</h2>
     <div class="body tbl-scroll">
       <table class="list" id="tbl">
         <thead>
@@ -33,6 +50,12 @@
             <th data-k="rank">順位</th>
             <th class="l" data-k="code">コード</th>
             <th class="l" data-k="name">銘柄名</th>
+            <th class="l" data-k="eff_group" title="現在この銘柄のRAWを必要としているProject（05/111/109/104-3等）。クリックで利用履歴の詳細を展開">利用Project</th>
+            <th data-k="effective_update_mode" title="registry(共通RAW取得センター)が判定した更新モード。pinned または daily 要求のあるProjectが1つでもあれば「毎日」">更新</th>
+            <th data-k="pinned" title="常に毎日取得（ONにすると他Projectの利用状況に関わらずdaily固定）">固定</th>
+            <th class="l" data-k="registry_last_fetch" title="registry(共通RAW取得センター)に記録された、このRAWの最終取得日時">RAW最終取得</th>
+            <th data-k="registry_fetch_status" title="直近のMonex取得結果（success/error/未取得）">取得状態</th>
+            <th>管理</th>
             <th data-k="current_price">株価</th>
             <th data-k="total_rank_100" title="quality_score(80点)+valuation_score(20点)。valuation_status=insufficient_dataの銘柄は評価不能">総合ランク <a class="score-help" href="score-method.html#total-rank" title="計算方法を見る" onclick="event.stopPropagation()">?</a></th>
             <th data-k="total_score_100" title="100点満点。評価不能銘柄は「-」表示（従来のquality_score(80点)は銘柄詳細で確認できます）">総合100 <a class="score-help" href="score-method.html#total-score" title="計算方法を見る" onclick="event.stopPropagation()">?</a></th>
@@ -44,7 +67,6 @@
             <th data-k="equity_ratio">自己資本比率</th>
             <th class="l" data-k="data_as_of">決算期</th>
             <th class="l" data-k="fetched_at">更新日時</th>
-            <th>削除</th>
           </tr>
         </thead>
         <tbody></tbody>

@@ -1,17 +1,28 @@
 "use strict";
-// 05 ローカルビューアサーバー（依存ゼロ・読み取り専用）
+// 05 ローカルビューアサーバー（依存ゼロ・読み取り専用が原則。共通RAW管理操作のみ
+// 既存registryモジュール(scripts/monex_registry.py)をサブプロセス実行して書き込む）
 // 起動: node viewer/server.js  → http://<このPCのIP>:8055/
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 
 const PORT = 8055;
 const HOST = "0.0.0.0";
 const ROOT = path.join(__dirname, "..");
 const DATA_DIR = path.join(ROOT, "data");
 const PUBLIC_DIR = path.join(__dirname, "public");
+// 共通RAW取得センターのregistry(2026-09-04〜)。正本はSQLite(data/stock_registry.sqlite3)だが、
+// ビューア(Node・依存ゼロ)はSQLiteを直接読まず、registry側が書き出す人間確認用CSV
+// (stock_registry_view.csv / stock_registry_usage_view.csv)を読む。これらは
+// scripts/monex_registry.py の pin/unpin/set-usage/import-existing と
+// scripts/request_monex_raw.py・scripts/registry_daily_sync.py が既存の書き込み経路で
+// 呼び出すたびに export_view() で更新されるため、ビューア側で判定ロジックを再実装しない。
+const REGISTRY_VIEW_PATH = path.join(DATA_DIR, "stock_registry_view.csv");
+const REGISTRY_USAGE_VIEW_PATH = path.join(DATA_DIR, "stock_registry_usage_view.csv");
+const REGISTRY_CLI_PATH = path.join(ROOT, "scripts", "monex_registry.py");
+const MODE_LABEL = { daily: "毎日", on_demand: "必要時", inactive: "停止" };
 // 108Phase2-B: 05・104-3が共通で参照するマネックス貼付原文の共有ストア(105/104-3どちらの
 // 加工ロジックも変更せず、原文保存先だけを共通化する。詳細は _shared_monex_raw/README.md)
 const SHARED_RAW_ROOT = path.join(ROOT, "..", "_shared_monex_raw");
@@ -962,6 +973,149 @@ async function apiDeleteStock(req, res) {
   sendJson(res, 200, { code, removed });
 }
 
+// ── 共通RAW管理registry(view CSV)の読み込み・統合 ──────────────────────
+// 正本のdaily/on_demand/inactive判定はすべてregistry(monex_registry.py)側で行われた結果
+// (effective_update_mode列)をそのまま使う。ここで別の判定ロジックを作らない。
+function loadRegistryViews() {
+  const stocks = csvToObjects(REGISTRY_VIEW_PATH) || [];
+  const usages = csvToObjects(REGISTRY_USAGE_VIEW_PATH) || [];
+  const usagesByCode = new Map();
+  for (const u of usages) {
+    if (!usagesByCode.has(u.code)) usagesByCode.set(u.code, []);
+    usagesByCode.get(u.code).push(u);
+  }
+  return { stocks, usagesByCode };
+}
+
+// registryのstocks行1件をビューア表示用に整形する（未登録銘柄はnullのまま呼び出し側でフォールバック）
+function formatRegistryFields(regRow, usagesForCode) {
+  const usages = usagesForCode || [];
+  const activeUsages = usages.filter(u => u.active === "1");
+  return {
+    registry_present: true,
+    pinned: regRow.pinned === "1",
+    effective_update_mode: regRow.effective_update_mode || "inactive",
+    effective_update_mode_label: MODE_LABEL[regRow.effective_update_mode] || regRow.effective_update_mode || "-",
+    raw_present: regRow.raw_present === "1",
+    registry_last_fetch: regRow.last_fetch || "",
+    registry_fetch_status: regRow.fetch_status || "",
+    registry_last_error: regRow.last_error || "",
+    registry_data_as_of: regRow.data_as_of || "",
+    registry_name: regRow.name || "",
+    // active_projects例: "05:daily;111/defense:on_demand"。テーマ別project("111/defense")は
+    // "/"より前を代表表示名(111)としてバッジ化しつつ、詳細(usages)で元projectを確認できるようにする。
+    active_projects: activeUsages.map(u => ({
+      project: u.project, group: u.project.split("/")[0],
+      mode: u.requested_mode, mode_label: MODE_LABEL[u.requested_mode] || u.requested_mode,
+      last_required: u.last_required, reason: u.reason,
+    })),
+    usages: usages.map(u => ({
+      project: u.project, group: u.project.split("/")[0], active: u.active === "1",
+      mode: u.requested_mode, mode_label: MODE_LABEL[u.requested_mode] || u.requested_mode,
+      last_required: u.last_required, reason: u.reason, run_id: u.run_id, updated_at: u.updated_at,
+    })),
+  };
+}
+
+// registryに存在しない銘柄（例: registry未import時点の古い手動貼付等）向けの既定値
+function emptyRegistryFields() {
+  return {
+    registry_present: false, pinned: false, effective_update_mode: "", effective_update_mode_label: "-",
+    raw_present: false, registry_last_fetch: "", registry_fetch_status: "", registry_last_error: "",
+    registry_data_as_of: "", registry_name: "", active_projects: [], usages: [],
+  };
+}
+
+// registryのstocks(view CSV)からダッシュボード上部の集計値を作る。固定値は使わず必ずここから算出する。
+function computeRegistrySummary(registryStocks) {
+  const s = { total: registryStocks.length, daily: 0, on_demand: 0, inactive: 0, raw_present: 0, pinned: 0 };
+  for (const r of registryStocks) {
+    if (r.effective_update_mode === "daily") s.daily++;
+    else if (r.effective_update_mode === "on_demand") s.on_demand++;
+    else s.inactive++;
+    if (r.raw_present === "1") s.raw_present++;
+    if (r.pinned === "1") s.pinned++;
+  }
+  return s;
+}
+
+// 既存のスコア一覧(list)へregistry情報をcodeでJOINし、registryにしか無い銘柄
+// (111/109/104-3が一時取得しただけでfundamental_scores.csvに未登録の銘柄等)も行として追加する。
+// codeは常に文字列のまま扱う（285A等の英数字コードを壊さない）。
+function mergeRegistryIntoList(list, registryStocks, usagesByCode) {
+  const regByCode = new Map(registryStocks.map(r => [String(r.code), r]));
+  const known = new Set(list.map(s => String(s.code)));
+  const merged = list.map(s => {
+    const code = String(s.code);
+    const regRow = regByCode.get(code);
+    return { ...s, ...(regRow ? formatRegistryFields(regRow, usagesByCode.get(code)) : emptyRegistryFields()) };
+  });
+  for (const r of registryStocks) {
+    const code = String(r.code);
+    if (known.has(code)) continue;
+    known.add(code);
+    merged.push({
+      rank: "", code, name: r.name || "(registry)", code_source: "registry_only",
+      quality_rank: "", quality_score: "", growth: "", profitability: "", financial: "",
+      valuation_score: "", valuation_status: "", total_score_100: "", total_rank_100: "",
+      data_as_of: "", fetched_at: "", fundamentals: null,
+      ...formatRegistryFields(r, usagesByCode.get(code)),
+    });
+  }
+  return merged;
+}
+
+function safeProject(raw) {
+  // "111" や "111/defense" のようなテーマ付きproject名を許可する。
+  return /^[0-9A-Za-z_-]{1,20}(\/[0-9A-Za-z_-]{1,40})?$/.test(raw) ? raw : null;
+}
+
+function pythonCmd() {
+  return process.platform === "win32" ? "python" : "python3";
+}
+
+// registryへの書き込みは既存CLI(scripts/monex_registry.py)をサブプロセス実行するだけで、
+// ビューア側にdaily/on_demand判定やeffective_update_mode更新のロジックは一切持たない。
+// execFileSyncはargv配列を直接execするためシェル展開・インジェクションの余地が無い。
+function runRegistryCli(args) {
+  const out = execFileSync(pythonCmd(), [REGISTRY_CLI_PATH, ...args], {
+    cwd: ROOT, encoding: "utf8", timeout: 15000, windowsHide: true,
+  });
+  return out;
+}
+
+// pinのON/OFF。pinned=1は「effective_update_modeを常にdailyにする」既存ロジック(recompute_effective)
+// を素通しするだけで、このAPI自体はdaily/inactiveを判定しない。
+async function apiRegistryPin(req, res) {
+  const body = JSON.parse(await readBody(req) || "{}");
+  const code = safeCode(String(body.code || ""));
+  if (!code) return sendJson(res, 400, { error: "invalid code" });
+  const pinned = !!body.pinned;
+  try {
+    runRegistryCli([pinned ? "pin" : "unpin", code, "--reason", "05_viewer_manual"]);
+    sendJson(res, 200, { code, pinned });
+  } catch (e) {
+    sendJson(res, 500, { error: String((e && e.message) || e) });
+  }
+}
+
+// 「このProjectでのこの銘柄の利用を停止する」= project_usage.active=0(inactive)にするだけ。
+// 対象project以外の利用（例: 05のdaily）や、RAW本体には一切触れない
+// (set-usage --inactiveは既存registryのeffective_update_mode再計算を経由するのみ)。
+// dailyへの昇格やreactivateはこのAPIでは提供しない(誤操作で日次対象を増やさないため)。
+async function apiRegistryDeactivateUsage(req, res) {
+  const body = JSON.parse(await readBody(req) || "{}");
+  const code = safeCode(String(body.code || ""));
+  const project = safeProject(String(body.project || ""));
+  if (!code || !project) return sendJson(res, 400, { error: "invalid code/project" });
+  try {
+    runRegistryCli(["set-usage", "--project", project, "--codes", code, "--inactive", "--reason", "05_viewer_manual_deactivate"]);
+    sendJson(res, 200, { code, project, active: false });
+  } catch (e) {
+    sendJson(res, 500, { error: String((e && e.message) || e) });
+  }
+}
+
 function apiStocks(res) {
   const scores = csvToObjects(path.join(DATA_DIR, "fundamental_scores.csv")) || [];
   const funds = csvToObjects(path.join(DATA_DIR, "fundamentals.csv")) || [];
@@ -1065,7 +1219,13 @@ function apiStocks(res) {
       });
     }
   }
-  sendJson(res, 200, { stocks: list, generated_at: new Date().toISOString() });
+  // 共通RAW取得センターregistryをcodeでJOIN（registry-only銘柄も追加）。読み取りのみ、
+  // ここでの表示処理がregistry/RAWを書き換えることは無い。
+  const { stocks: registryStocks, usagesByCode } = loadRegistryViews();
+  const merged = mergeRegistryIntoList(list, registryStocks, usagesByCode);
+  const registrySummary = computeRegistrySummary(registryStocks);
+
+  sendJson(res, 200, { stocks: merged, generated_at: new Date().toISOString(), registry_summary: registrySummary });
 }
 
 function apiStock(res, code) {
@@ -1292,6 +1452,12 @@ const server = http.createServer((req, res) => {
     if (u.pathname === "/api/delete-stock" && req.method === "POST") {
       return apiDeleteStock(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
     }
+    if (u.pathname === "/api/registry/pin" && req.method === "POST") {
+      return apiRegistryPin(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
+    }
+    if (u.pathname === "/api/registry/deactivate-usage" && req.method === "POST") {
+      return apiRegistryDeactivateUsage(req, res).catch(e => sendJson(res, 500, { error: String(e && e.message || e) }));
+    }
     const ms = u.pathname.match(/^\/api\/source\/([^/]+)$/);
     if (ms) {
       const code = safeCode(ms[1]);
@@ -1327,4 +1493,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { computeValuation, computeQualityScore, buildManualScore, saveSharedMonexRaw, apiManual };
+module.exports = {
+  computeValuation, computeQualityScore, buildManualScore, saveSharedMonexRaw, apiManual,
+  mergeRegistryIntoList, computeRegistrySummary, formatRegistryFields,
+};

@@ -415,10 +415,17 @@ class Registry:
         summary["daily_total"] = len(self.daily_codes())
         return summary
 
-    def export_view(self, view_path: Path | str = VIEW_CSV_PATH, usage_view_path: Path | str = USAGE_VIEW_CSV_PATH) -> tuple[Path, Path]:
-        """人間確認用CSV(書き出し専用)。"""
-        view_path = Path(view_path)
-        usage_view_path = Path(usage_view_path)
+    def export_view(self, view_path: Path | str | None = None, usage_view_path: Path | str | None = None) -> tuple[Path, Path]:
+        """人間確認用CSV(書き出し専用)。
+        2026-09-05修正: 引数省略時は self.db_path と同じディレクトリへ書き出す(以前は
+        本番パス(VIEW_CSV_PATH/USAGE_VIEW_CSV_PATH)にモジュール定義時点で固定されていたため、
+        --db/MONEX_REGISTRY_DB でテスト用DBに隔離しても、export_view()だけは本番の
+        stock_registry_view.csv / stock_registry_usage_view.csv を上書きしてしまっていた
+        (05ローカルビューアが読む共通RAW管理表示が、他Projectのテスト実行のたびに
+        テストDBの内容で一時的に破壊される実害があった)。本番実行(db_path省略時)は
+        従来どおり data/stock_registry_view.csv 等に書く。"""
+        view_path = Path(view_path) if view_path else self.db_path.parent / "stock_registry_view.csv"
+        usage_view_path = Path(usage_view_path) if usage_view_path else self.db_path.parent / "stock_registry_usage_view.csv"
         stocks = self.list_stocks()
         usages = self.conn.execute("SELECT * FROM project_usage ORDER BY code, project").fetchall()
         by_code: dict[str, list[sqlite3.Row]] = {}
