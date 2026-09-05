@@ -296,6 +296,11 @@ python scripts\request_monex_raw.py --project 109 --codes 8306 --page-type topix
 レジストリ更新 → 結果JSON（stdout / `--json-out`）。終了コード 0=全件OK / 2=一部失敗 / 3=05ログイン更新が必要 / 4=ロック待ちタイムアウト / 1=致命的。
 
 **失敗時は前回正常RAW（last good RAW）を絶対に上書きしない**（`fetch_status=error` / `last_error` の更新のみ）。
+この保護は取得本体 `playwright_batch_fetch_financials.js` の `fetchOne` 自体に入っている（2026-09-04）: 本文を同一ディレクトリの
+一時ファイル（`.tmp{pid}`）へ書き、`monex_raw_validate.js`（`validateRawText` = auth_detect.js + evaluateFinancialText +
+銘柄コード一致 + 本文長。判定ロジックの唯一の正本）を通過した場合だけ `rename` で正本へ原子的に置換するため、
+**05日次（fetch_target_financials.ps1）でも on-demand でも同じ保護が効く**。不合格時はログに `raw NOT promoted` を残す。
+検証: `node tests/test_batch_fetch_raw_protection.js`（偽ブラウザ・約3分）/ `tests/test_fetch_exit_code.ps1`（偽nodeで終了コード判定）。
 RAW保存先は従来どおり `data/raw/{code}.*`（05正本）と `_shared_monex_raw/{code}/`（共通・`saveSharedMonexRaw` が成功時に保存）。
 `--page-type topix_news` は `data/raw_topix/{code}.txt|.html|_news.json`（`scripts/playwright_fetch_monex_topix_news.js`）。
 

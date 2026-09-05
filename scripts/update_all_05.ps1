@@ -2,9 +2,18 @@
 # 05_マネックス銘柄スカウター自動取得 の定期更新を実行するためのラッパースクリプト。
 # 既存の正式な更新処理（scripts/run_project.ps1）を呼び出すだけで、新しい取得・生成ロジックは作らない。
 #
+# 本スクリプトの責務は以下に限定する。Git commit / git push は一切行わない
+# （git add / git commit / git push を呼び出すコードはこのファイルに存在しない）。
+#   - Monex取得（run_project.ps1経由）
+#   - RAW更新・parser・CSV生成・registry更新
+#   - 取得結果の検証（レポート存在確認・必須文字列チェック・取得成功数チェック）
+#
+# commitやpushが必要な場合は、本スクリプトの実行結果を確認した上で、
+# ユーザーまたはClaudeが別途明示的に git commit / git push を実行すること
+# （日次自動実行の範囲外とする。2026-09-04 事故を受けて分離）。
+#
 # 実行内容（黒いPowerShell画面に進捗を流しながら、logs/ にも同じ内容を保存する）:
-#   [1/11] git status（更新前）
-#   [2/11] scripts/run_project.ps1 を実行（既存の正式なパイプライン）
+#   [1/7] scripts/run_project.ps1 を実行（既存の正式なパイプライン）
 #         → 04の follow_candidates.csv 突合 → fetch_target_financials.ps1 →
 #           generate_fundamentals.ps1 → generate_fundamental_scores.ps1 →
 #           generate_fundamental_report.ps1 → 04側候補再生成 →
@@ -12,30 +21,26 @@
 #         → 本スクリプトは自動実行モード専用。05専用Chromeプロファイルに
 #           ログイン状態が既に保存されている前提で取得し、人間の入力は
 #           一切待たない。ログイン切れ・未ログインの場合は安全に失敗して
-#           終了する（commit/pushしない）。
+#           終了する。
 #           マネックスへの手動ログイン更新は scripts\login_monex_profile_05.ps1
 #           （専用スクリプト）で行うこと。
-#   [3/11] reports/fundamental_scores.md 存在確認
-#   [4/11] reports/fundamental_fetch_summary.md 存在確認
-#   [5/11] 必須文字列チェック（05の実ファイルから採取した文言）
-#   [6/11] 取得成功数チェック（data/fetch_status.csv・fundamental_fetch_summary.md記載値）
+#   [2/7] reports/fundamental_scores.md 存在確認
+#   [3/7] reports/fundamental_fetch_summary.md 存在確認
+#   [4/7] 必須文字列チェック（05の実ファイルから採取した文言）
+#   [5/7] 取得成功数チェック（data/fetch_status.csv・fundamental_fetch_summary.md記載値）
 #         → 最新取得成功数が0件、successRate=0%、または通常レポートが今回更新されず
-#           fallback専用レポートのみ更新された場合は赤字エラーで停止し、
-#           commit/push を一切行わない（最新取得0件＝失敗として扱う）。
-#   [7/11] git diff --stat 表示
-#   [8/11] 変更があれば git add -A → git commit
-#   [9/11] commit した場合のみ git push
-#  [10/11] 最終 git status 表示
-#  [11/11] 04側 git status 確認（参考情報のみ、04のcommit/pushは行わない）
+#           fallback専用レポートのみ更新された場合は赤字エラーで停止する
+#           （最新取得0件＝失敗として扱う）。
+#   [6/7] 最終 git status 表示（参考情報のみ。add/commit/pushは一切行わない）
+#   [7/7] 04側 git status 確認（参考情報のみ、04のcommit/pushは行わない）
 #         → run_project.ps1 が04の follow_candidates.csv 等を再生成する場合があるため、
 #           05がcleanでも04側に未コミット変更が残っていないか確認するためのチェック
 #
-# エラーが発生した場合は赤字で停止理由を表示し、commit/push は行わない。
+# エラーが発生した場合は赤字で停止理由を表示する。
 # 正常終了・異常終了のどちらでも、最後に Read-Host で必ず一時停止してから画面を閉じる
 # （try/catch/finally構成。途中で例外が起きても finally が必ず実行される）。
 #
 # パスワード・トークン等の秘密情報はこのファイルに一切含めない。
-# GitHub への認証は、実行PCに既にログイン済みの状態（git credential 等）を前提とする。
 
 param()
 
@@ -54,7 +59,7 @@ $LogTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFileName  = "update_05_$LogTimestamp.log"
 $LogPath      = Join-Path $LogsDir $LogFileName
 
-$TOTAL    = 11
+$TOTAL    = 7
 $ExitCode = 0
 
 function Write-Step($n, $total, $msg) {
@@ -73,7 +78,7 @@ function Write-WarnBox($msg) {
 # 記録されていればログインセッション切れとみなし、最前面にポップアップで知らせる。
 # （自動実行モードは人間の入力を待たず即エラー終了するだけなので、
 #   PCの前にいないと気づけない問題への対処。判定・通知のみ追加し、
-#   既存の取得・commit/pushロジックには一切手を入れない。）
+#   既存の取得ロジックには一切手を入れない。）
 function Show-LoginAlertIfNeeded {
     param([string]$RunLogPath)
     try {
@@ -199,6 +204,7 @@ try {
     Write-Host "注意: 自動実行モードのため、05専用Chromeプロファイルに保存済みの" -ForegroundColor Yellow
     Write-Host "      ログイン状態のみを使用します（人間の入力待ちは行いません）。" -ForegroundColor Yellow
     Write-Host "      ログイン切れの場合は scripts\login_monex_profile_05.ps1 で更新してください。" -ForegroundColor Yellow
+    Write-Host "注意: 本スクリプトは commit/push を行いません（データ更新のみ）。" -ForegroundColor Gray
 
     Write-Host ""
     Write-Host "[cleanup] 実行前クリーンアップ（05専用プロファイルのみ対象）" -ForegroundColor Gray
@@ -206,11 +212,7 @@ try {
     Remove-Monex05LockFiles -ResolvedProfileDir $MonexProfileDir
 
     try {
-        Write-Step 1 $TOTAL "git status"
-        git status
-        if ($LASTEXITCODE -ne 0) { throw "git status の実行に失敗しました（Gitリポジトリか確認してください）。" }
-
-        Write-Step 2 $TOTAL "run_project.ps1 実行（正式更新パイプライン）"
+        Write-Step 1 $TOTAL "run_project.ps1 実行（正式更新パイプライン）"
         $runProject = Join-Path $ProjectDir "scripts\run_project.ps1"
         if (-not (Test-Path $runProject)) { throw "scripts\run_project.ps1 が見つかりません。" }
         & powershell -NoProfile -ExecutionPolicy Bypass -File $runProject
@@ -219,17 +221,17 @@ try {
             throw "scripts\run_project.ps1 が異常終了しました（exit code: $LASTEXITCODE）。"
         }
 
-        Write-Step 3 $TOTAL "reports\fundamental_scores.md 存在確認"
+        Write-Step 2 $TOTAL "reports\fundamental_scores.md 存在確認"
         $scoresReport = Join-Path $ProjectDir "reports\fundamental_scores.md"
         if (-not (Test-Path $scoresReport)) { throw "reports\fundamental_scores.md が生成されていません。" }
         Write-Ok "reports\fundamental_scores.md 存在確認"
 
-        Write-Step 4 $TOTAL "reports\fundamental_fetch_summary.md 存在確認"
+        Write-Step 3 $TOTAL "reports\fundamental_fetch_summary.md 存在確認"
         $summaryReport = Join-Path $ProjectDir "reports\fundamental_fetch_summary.md"
         if (-not (Test-Path $summaryReport)) { throw "reports\fundamental_fetch_summary.md が生成されていません。" }
         Write-Ok "reports\fundamental_fetch_summary.md 存在確認"
 
-        Write-Step 5 $TOTAL "必須文字列チェック"
+        Write-Step 4 $TOTAL "必須文字列チェック"
         $scoresContent = Get-Content -Raw -Encoding UTF8 $scoresReport
         $requiredScoresStrings = @(
             "# Fundamental quality_score report",
@@ -255,7 +257,7 @@ try {
             Write-Ok "reports\fundamental_fetch_summary.md 内「$s」を確認"
         }
 
-        Write-Step 6 $TOTAL "取得成功数チェック"
+        Write-Step 5 $TOTAL "取得成功数チェック"
         $fetchStatusPath = Join-Path $ProjectDir "data\fetch_status.csv"
         if (-not (Test-Path $fetchStatusPath)) {
             throw "data\fetch_status.csv が見つかりません。取得処理が完了していない可能性があります。"
@@ -294,48 +296,16 @@ try {
             Write-Host ""
             Write-Host "=========================================" -ForegroundColor Red
             Write-Host "マネックス最新取得成功数が0件のため、05更新は失敗扱いにします。" -ForegroundColor Red
-            Write-Host "fallbackデータのみではcommit/pushしません。" -ForegroundColor Red
             Write-Host "マネックス銘柄スカウターの認証状態を確認して、再実行してください。" -ForegroundColor Red
             Write-Host "=========================================" -ForegroundColor Red
             throw "マネックス最新取得成功数0件のため停止しました（success=$successFetchCount/$totalFetchCount, successRate=$fetchSuccessRate%）。"
         }
         Write-Ok "取得成功数チェックOK（success=$successFetchCount/$totalFetchCount, successRate=$fetchSuccessRate%）"
 
-        Write-Step 7 $TOTAL "git diff --stat"
-        git diff --stat
-        if ($LASTEXITCODE -ne 0) { throw "git diff の実行に失敗しました。" }
-
-        Write-Step 8 $TOTAL "変更があれば commit"
-        $changedFiles = git status --porcelain
-        $didCommit = $false
-        if ($changedFiles) {
-            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm"
-            $commitMsg = "update: refresh 05 dashboard $timestamp"
-            Write-Host "  変更を検出しました。コミットします: $commitMsg" -ForegroundColor Yellow
-
-            git add -A
-            if ($LASTEXITCODE -ne 0) { throw "git add に失敗しました。" }
-
-            git commit -m $commitMsg
-            if ($LASTEXITCODE -ne 0) { throw "git commit に失敗しました。" }
-            $didCommit = $true
-        } else {
-            Write-Host "  変更なし。commit はスキップします。" -ForegroundColor Yellow
-        }
-
-        Write-Step 9 $TOTAL "commitした場合のみ push"
-        if ($didCommit) {
-            git push
-            if ($LASTEXITCODE -ne 0) { throw "git push に失敗しました（GitHubへの認証状態を確認してください）。" }
-            Write-Host "  push 完了" -ForegroundColor Green
-        } else {
-            Write-Host "  commitしていないため push はスキップします。" -ForegroundColor Yellow
-        }
-
-        Write-Step 10 $TOTAL "最終 git status"
+        Write-Step 6 $TOTAL "最終 git status（参考情報のみ。add/commit/pushは行わない）"
         git status
 
-        Write-Step 11 $TOTAL "04側 git status 確認（参考情報のみ）"
+        Write-Step 7 $TOTAL "04側 git status 確認（参考情報のみ）"
         $SourceProjectDir = Join-Path (Resolve-Path (Join-Path $ProjectDir "..")) "04_強銘柄追随"
         if (-not (Test-Path $SourceProjectDir)) {
             Write-WarnBox "04プロジェクトフォルダが見つかりません: $SourceProjectDir"

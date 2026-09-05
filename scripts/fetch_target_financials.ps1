@@ -184,10 +184,16 @@ function Invoke-BatchFetch {
     # このPowerShellコンソール/トランスクリプトに流れ、終了コードも$LASTEXITCODEで
     # 確実に取得できる（Start-Process -NoNewWindow -PassThru は .ExitCode が
     # 正しく取得できない場合があるため使用しない）。
+    # 2026-09-04 修正: nodeの標準出力("[1/72] fetch 5803" 等)を関数の戻り値(パイプライン)に混ぜない。
+    # 従来は `& node $nodeArgs` の出力がそのまま関数出力に流れ、呼び出し側の $nodeExitCode が
+    # 「出力行の配列 + 終了コード」になっていた(ログの "returned non-zero exitCode=[1/72] fetch ..." の原因)。
+    # 標準出力は Out-Host で画面/トランスクリプトへ流し、終了コードは $LASTEXITCODE(実プロセスの値)だけを返す。
+    # 標準エラーはリダイレクトせずそのままコンソールへ出す(2>&1 は $ErrorActionPreference=Stop 下で
+    # NativeCommandError になり得るため使わない)。
     $nodeExitCode = 0
     try {
-        & node $nodeArgs
-        $nodeExitCode = $LASTEXITCODE
+        & node $nodeArgs | Out-Host
+        $nodeExitCode = [int]$LASTEXITCODE
     }
     finally {
         # 正常終了・異常終了どちらでも、05専用プロファイルを使い終えたら必ず後始末する。

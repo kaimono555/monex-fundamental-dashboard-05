@@ -477,7 +477,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--lock-wait-sec", type=int, default=900)
     ap.add_argument("--json-out", default="", help="結果JSONの保存先(省略時は標準出力のみ)")
     ap.add_argument("--keep-tmp", action="store_true")
-    ap.add_argument("--db", default="", help="レジストリDBの明示指定(テスト用。通常は省略)")
+    ap.add_argument("--db", default=os.environ.get("MONEX_REGISTRY_DB", ""),
+                    help="レジストリDBの明示指定(テスト用。通常は省略。環境変数 MONEX_REGISTRY_DB でも指定可)")
     args = ap.parse_args(argv)
 
     try:

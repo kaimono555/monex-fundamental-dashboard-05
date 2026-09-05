@@ -2,7 +2,7 @@
 const path = require("path");
 const crypto = require("crypto");
 const { spawn: spawnProcess } = require("child_process");
-const { detectAuthErrorPage } = require("./auth_detect");
+// 認証判定(auth_detect.js)は monex_raw_validate.js 経由で使う(このファイルでは直接呼ばない)
 
 // 108Phase2-B: 05・104-3が共通で参照するマネックス貼付原文の共有ストア。
 // viewer/server.js の saveSharedMonexRaw() と同じ保存先・仕様(1銘柄=最新RAW1件のみ)。
@@ -162,23 +162,9 @@ function writeCsv(filePath, rows) {
   fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
-function evaluateFinancialText(text, html = "") {
-  const authError = detectAuthErrorPage(text, html);
-  const hasFiscalPeriod = /\d{4}\/\d{2}/.test(text);
-  const metricLabels = ["売上高", "営業利益", "経常利益", "純利益", "EPS"];
-  const foundMetricLabels = metricLabels.filter((label) => text.includes(label));
-  const financialRows = text
-    .split(/\r?\n/)
-    .filter((line) => /^\d{4}\/\d{2}\b/.test(line.trim()) && line.split("\t").length >= 9);
-  return {
-    ok: !authError.detected && hasFiscalPeriod && foundMetricLabels.length >= 4 && financialRows.length > 0,
-    hasAuthError: authError.detected,
-    authMarker: authError.marker,
-    hasFiscalPeriod,
-    foundMetricLabels,
-    financialRowCount: financialRows.length
-  };
-}
+// 2026-09-04: 成功判定(evaluateFinancialText)と正本昇格ゲート(validateRawText)は monex_raw_validate.js へ移設
+// (判定内容は不変)。request_monex_raw.py 側の validate_monex_raw.js も同じモジュールを使う(別実装しない)。
+const { evaluateFinancialText, validateRawText, DEFAULT_MIN_CHARS } = require("./monex_raw_validate");
 
 function extractSourceUpdateDate(text) {
   const patterns = [
@@ -322,12 +308,21 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
         printRed(`[ERROR] code=${code} 60秒以内に銘柄スカウター財務ページが表示されませんでした（タイムアウト）。この銘柄をスキップします。`);
         break;
       }
-      fs.writeFileSync(htmlPath, pageData.html, "utf8");
-      fs.writeFileSync(textPath, pageData.text, "utf8");
-      writeRunLog(logPath, `raw saved code=${code} html=${htmlPath} text=${textPath} textChars=${pageData.text.length}`);
-
+      // 2026-09-04 last good RAW 保護: 取得本文はまず一時ファイル(同一ディレクトリ・.tmp{pid})へ書き、
+      // validateRawText(認証エラー無し・財務マーカー・銘柄コード一致・本文長)を通過したときだけ
+      // 正本 data/raw/{code}.html|.txt へ原子的に置換(rename)する。不合格なら一時ファイルは作らず、
+      // 既存の正常RAW・_shared_monex_raw は一切触らない(日次・on-demand 共通)。
+      const tmpHtmlPath = `${htmlPath}.tmp${process.pid}`;
+      const tmpTextPath = `${textPath}.tmp${process.pid}`;
+      const validation = validateRawText(code, pageData.text, pageData.html, DEFAULT_MIN_CHARS);
       const result = pageData.result;
-      if (result.ok) {
+      if (validation.ok) {
+        ensureDirectory(path.dirname(htmlPath));
+        fs.writeFileSync(tmpHtmlPath, pageData.html, "utf8");
+        fs.writeFileSync(tmpTextPath, pageData.text, "utf8");
+        fs.renameSync(tmpHtmlPath, htmlPath);
+        fs.renameSync(tmpTextPath, textPath);
+        writeRunLog(logPath, `raw saved code=${code} html=${htmlPath} text=${textPath} textChars=${pageData.text.length} (validated, atomic replace)`);
         writeRunLog(logPath, `fetch success code=${code} metrics=${result.foundMetricLabels.join("|")} financialRows=${result.financialRowCount}`);
         try {
           saveSharedMonexRaw(code, "", pageData.text);
@@ -350,6 +345,7 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
         };
       }
 
+      writeRunLog(logPath, `raw NOT promoted code=${code} attempt=${attempt} reason=${validation.reason} textChars=${pageData.text.length} (last good RAW kept)`);
       if (result.hasAuthError) {
         lastErrorType = "auth_error";
         lastErrorMessage = "authentication page detected";
@@ -359,9 +355,13 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
       } else if (!result.hasFiscalPeriod) {
         lastErrorType = "financial_markers_not_found";
         lastErrorMessage = "fiscal period not found";
-      } else {
+      } else if (!result.ok) {
         lastErrorType = "financial_rows_not_found";
         lastErrorMessage = `financial rows or metric labels not found rows=${result.financialRowCount} metrics=${result.foundMetricLabels.join("|")}`;
+      } else {
+        // 財務本文としては成立しているが、銘柄コード不一致 or 本文が短すぎる(別銘柄ページ・不完全取得)
+        lastErrorType = "validation_failed";
+        lastErrorMessage = validation.reason;
       }
       writeRunLog(logPath, `fetch attempt failed code=${code} attempt=${attempt} type=${lastErrorType} message=${lastErrorMessage}`);
     } catch (error) {
@@ -799,6 +799,8 @@ async function main() {
 // 認証判定・取得ロジックを別ファイルへコピーして二重実装しないための最小リファクタ。
 module.exports = {
   evaluateFinancialText,
+  validateRawText,
+  fetchOne,
   extractSourceUpdateDate,
   isOnExpectedScoutPage,
   isFinancialScoutPageReady,
