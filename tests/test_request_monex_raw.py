@@ -23,7 +23,19 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import monex_fetch_lock as lockmod  # noqa: E402
 import monex_registry as regmod  # noqa: E402
+import parse_monex_raw as pm  # noqa: E402
 import request_monex_raw as req  # noqa: E402
+
+
+def fake_parser_runner(code, raw_dir, out_dir, ext_dir, log_path):
+    """PowerShell パーサの代わり: RAW本文から最小の {code}_financials.csv を書く(本文が壊れていれば失敗)。"""
+    text = (Path(raw_dir) / f"{code}.txt").read_text(encoding="utf-8")
+    if "認証されたユーザのみ" in text or "売上高" not in text:
+        return {"rc": 1, "ext_rc": None, "stderr": "fake parser: financial markers not found"}
+    (Path(out_dir) / f"{code}_financials.csv").write_text(
+        '"決算期","売上高","営業利益","経常利益","当期利益","EPS","BPS"\n"2026/03","100","10","10","10","1.0","10.0"\n', encoding="utf-8")
+    (Path(ext_dir) / f"{code}_cashflow.csv").write_text('"決算期","営業CF"\n"2026/03","5"\n', encoding="utf-8")
+    return {"rc": 0, "ext_rc": 0, "stderr": ""}
 
 REAL_RAW = ROOT / "data" / "raw" / "5803.txt"
 
@@ -51,6 +63,11 @@ class _Env:
             (req, "LOGS_DIR", self.tmp / "logs"), (req, "REQUEST_LOG", self.tmp / "logs" / "req.log"),
             (req, "SHARED_RAW_ROOT", self.tmp / "shared"),
             (lockmod, "LOCK_PATH", self.tmp / "locks" / "monex_fetch.lock"),
+            # 2026-09-05: zaimu取得後の05解析(parse_monex_raw)も一時ディレクトリへ隔離し、PowerShellパーサは偽runnerに置き換える
+            (pm, "RAW_DIR", self.raw), (pm, "OUTPUT_DIR", self.tmp / "output"), (pm, "EXTENDED_DIR", self.tmp / "output_extended"),
+            (pm, "TMP_PARSE_DIR", self.tmp / "tmp_parse"), (pm, "LOCK_DIR", self.tmp / "locks"),
+            (pm, "PARSE_STATUS_CSV", self.tmp / "parse_status.csv"), (pm, "PARSE_LOG", self.tmp / "logs" / "parse.log"),
+            (pm, "DEFAULT_RUNNER", fake_parser_runner),
         ]:
             self.saved[(mod, name)] = getattr(mod, name)
             setattr(mod, name, val)

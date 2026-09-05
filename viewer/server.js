@@ -23,6 +23,17 @@ const REGISTRY_VIEW_PATH = path.join(DATA_DIR, "stock_registry_view.csv");
 const REGISTRY_USAGE_VIEW_PATH = path.join(DATA_DIR, "stock_registry_usage_view.csv");
 const REGISTRY_CLI_PATH = path.join(ROOT, "scripts", "monex_registry.py");
 const MODE_LABEL = { daily: "毎日", on_demand: "必要時", inactive: "停止" };
+// 2026-09-05: 05銘柄別解析データ(data/output/{code}_financials.csv 等)の解析状態。
+// scripts/parse_monex_raw.py が on-demand取得後/バックフィル時に書く(SQLite schemaは変えない)。
+// 「RAWがある」「解析済みである」「毎日取得する」「05ランキング対象である」は別概念であり、
+// ここでは表示用の状態判定だけを行う(書き込みはしない)。
+const PARSE_STATUS_PATH = path.join(DATA_DIR, "parse_status.csv");
+const PARSE_STATE_LABEL = {
+  parsed: "解析済み",
+  raw_unparsed: "RAW取得済み / 05解析未生成",
+  raw_parse_error: "RAW取得済み / 05解析エラー",
+  raw_missing: "RAW未取得",
+};
 // 108Phase2-B: 05・104-3が共通で参照するマネックス貼付原文の共有ストア(105/104-3どちらの
 // 加工ロジックも変更せず、原文保存先だけを共通化する。詳細は _shared_monex_raw/README.md)
 const SHARED_RAW_ROOT = path.join(ROOT, "..", "_shared_monex_raw");
@@ -1026,6 +1037,56 @@ function emptyRegistryFields() {
   };
 }
 
+// data/parse_status.csv(parse_monex_raw.py が書く解析状態) → Map(code → row)。無ければ空。
+function loadParseStatus() {
+  const rows = csvToObjects(PARSE_STATUS_PATH) || [];
+  return new Map(rows.map(r => [String(r.code), r]));
+}
+
+// 表示用の解析状態を決める(純粋関数・ファイルI/Oなし)。
+//   parsed          : data/output/{code}_financials.csv がある(05詳細画面を表示できる)
+//   raw_parse_error : RAWはあるが直近の解析がエラー(parse_status.csv status=error)。RAW取得successとは別
+//   raw_unparsed    : RAWはあるが05解析データ未生成
+//   raw_missing     : registry登録のみでRAW未取得
+//   ""              : registry未登録・解析CSVも無い(従来どおり)
+function computeParseState({ hasFinancialsCsv, registryPresent, rawPresent, parseRow }) {
+  const pr = parseRow || null;
+  let state = "";
+  if (hasFinancialsCsv) state = "parsed";
+  else if (registryPresent && rawPresent) state = (pr && pr.status === "error") ? "raw_parse_error" : "raw_unparsed";
+  else if (registryPresent) state = "raw_missing";
+  return {
+    parse_state: state,
+    parse_state_label: PARSE_STATE_LABEL[state] || "",
+    parse_status: pr ? (pr.status || "") : "",
+    parse_error: pr ? (pr.error || "") : "",
+    parsed_at: pr ? (pr.parsed_at || "") : "",
+  };
+}
+
+// 一覧の各行へ parse_state を付与する(mergeRegistryIntoList の後に呼ぶ)。parsedCodes = data/output にある解析CSVのcode集合。
+function attachParseState(rows, parsedCodes, parseStatusMap) {
+  return rows.map(r => ({
+    ...r,
+    ...computeParseState({
+      hasFinancialsCsv: parsedCodes.has(String(r.code)),
+      registryPresent: !!r.registry_present,
+      rawPresent: !!r.raw_present,
+      parseRow: parseStatusMap.get(String(r.code)),
+    }),
+  }));
+}
+
+// data/output にあるがスコア一覧(fundamental_scores/fallback)に無い解析CSVの出自を決める。
+//   手動貼付(manual_names.csv / manual_fundamentals.csv に記録あり) → "manual"
+//   registryに登録あり(共通RAW取得センターが取得したRAWを解析しただけ。05ランキング対象外) → "registry_only"
+//   どちらでもない(旧来の手動追加CSV) → "manual"(従来どおり)
+function resolveOutputCodeSource(code, { manualNames, manualFunds, regByCode }) {
+  if (manualNames.has(code) || manualFunds.has(code)) return "manual";
+  if (regByCode.has(code)) return "registry_only";
+  return "manual";
+}
+
 // registryのstocks(view CSV)からダッシュボード上部の集計値を作る。固定値は使わず必ずここから算出する。
 function computeRegistrySummary(registryStocks) {
   const s = { total: registryStocks.length, daily: 0, on_demand: 0, inactive: 0, raw_present: 0, pinned: 0 };
@@ -1167,20 +1228,31 @@ function apiStocks(res) {
     list.push({ ...s, rank: "", fallback_used: true, fundamentals: fmap.get(s.code) || null });
   }
 
+  // 共通RAW取得センターregistry(読み取りのみ)。下の data/output スキャンで、registryが取得したRAWを
+  // 解析しただけの銘柄(05ランキング対象外)を「手動追加」と誤表示しないために先に読む。
+  const { stocks: registryStocks, usagesByCode } = loadRegistryViews();
+  const regByCode = new Map(registryStocks.map(r => [String(r.code), r]));
+
   // 手動追加分（financials CSVはあるがスコア一覧に無い銘柄）も一覧に載せる
   const known = new Set(list.map(s => s.code));
   const manualNames = new Map((csvToObjects(path.join(DATA_DIR, "manual_names.csv")) || []).map(r => [r.code, r.name]));
   const outDir = path.join(DATA_DIR, "output");
+  const parsedCodes = new Set();
   if (fs.existsSync(outDir)) {
     for (const f of fs.readdirSync(outDir)) {
       const m = f.match(/^([0-9A-Za-z]{1,6})_financials\.csv$/);
-      if (!m || known.has(m[1])) continue;
+      if (!m) continue;
+      parsedCodes.add(m[1]);
+      if (known.has(m[1])) continue;
       const ms = buildManualScore(m[1]);
       const ind = ms ? ms.ind : null;
       const mfRow = ms ? ms.mf : null;
+      const codeSource = resolveOutputCodeSource(m[1], { manualNames, manualFunds: mfMap, regByCode });
+      const regRow = regByCode.get(m[1]);
       list.push({
-        rank: "", code: m[1], name: manualNames.get(m[1]) || "(手動追加)",
-        code_source: "manual",
+        rank: "", code: m[1],
+        name: manualNames.get(m[1]) || (codeSource === "registry_only" && regRow && regRow.name) || "(手動追加)",
+        code_source: codeSource,
         quality_rank: ms ? ms.quality_rank : "", quality_score: ms ? ms.quality_score : "",
         growth: ms ? ms.growth : "", profitability: ms ? ms.profitability : "", financial: ms ? ms.financial : "",
         valuation_score: ms ? ms.valuation_score : "", valuation_coverage: ms ? ms.valuation_coverage : "", valuation_status: ms ? ms.valuation_status : "",
@@ -1221,8 +1293,7 @@ function apiStocks(res) {
   }
   // 共通RAW取得センターregistryをcodeでJOIN（registry-only銘柄も追加）。読み取りのみ、
   // ここでの表示処理がregistry/RAWを書き換えることは無い。
-  const { stocks: registryStocks, usagesByCode } = loadRegistryViews();
-  const merged = mergeRegistryIntoList(list, registryStocks, usagesByCode);
+  const merged = attachParseState(mergeRegistryIntoList(list, registryStocks, usagesByCode), parsedCodes, loadParseStatus());
   const registrySummary = computeRegistrySummary(registryStocks);
 
   sendJson(res, 200, { stocks: merged, generated_at: new Date().toISOString(), registry_summary: registrySummary });
@@ -1230,7 +1301,16 @@ function apiStocks(res) {
 
 function apiStock(res, code) {
   let financials = csvToObjects(path.join(DATA_DIR, "output", `${code}_financials.csv`));
-  if (!financials) return sendJson(res, 404, { error: `code ${code} not found` });
+  // registry(共通RAW取得センター)の管理情報と解析状態。解析CSVが無い場合も
+  // 「RAW未取得」「RAW取得済み / 05解析未生成」を区別して返す(従来は一律404のみ)。
+  const { stocks: registryStocks, usagesByCode } = loadRegistryViews();
+  const regRow = registryStocks.find(r => String(r.code) === code) || null;
+  const registry = regRow ? formatRegistryFields(regRow, usagesByCode.get(code)) : null;
+  const parseState = computeParseState({
+    hasFinancialsCsv: !!financials, registryPresent: !!regRow,
+    rawPresent: !!(regRow && regRow.raw_present === "1"), parseRow: loadParseStatus().get(code),
+  });
+  if (!financials) return sendJson(res, 404, { error: `code ${code} not found`, code, registry, ...parseState });
   // 防御: 四半期速報値の誤取り込み行（決算期に New を含む）が混入していても表示しない
   financials = financials.filter(r => !/New/.test(String(r["決算期"])));
   const cashflow = csvToObjects(path.join(DATA_DIR, "output_extended", `${code}_cashflow.csv`));
@@ -1297,6 +1377,10 @@ function apiStock(res, code) {
     eps_forecast: epsForecast || [],
     fundamentals,
     score,
+    // 05ランキング対象(fundamentals.csv / fundamental_scores.csv に行がある)かどうか。registry管理対象とは別概念。
+    ranking_target: !!(fundsRow || scoreRow),
+    registry,
+    ...parseState,
   });
 }
 
@@ -1496,4 +1580,5 @@ if (require.main === module) {
 module.exports = {
   computeValuation, computeQualityScore, buildManualScore, saveSharedMonexRaw, apiManual,
   mergeRegistryIntoList, computeRegistrySummary, formatRegistryFields,
+  computeParseState, attachParseState, resolveOutputCodeSource, apiStock,
 };

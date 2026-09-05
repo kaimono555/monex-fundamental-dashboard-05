@@ -17,7 +17,13 @@
      validate_monex_raw.js(認証エラー/銘柄コード一致/財務マーカー/本文長)を通過したものだけ
      data/raw/{code}.txt|.html へ原子的に昇格(status=fetched)
   6. 失敗時は前回正常RAWを一切触らず、registry の fetch_status=error / last_error のみ更新
-  7. 結果JSONを標準出力へ返す
+  7. (2026-09-05追加) page_type=zaimu で status が fresh/fetched の銘柄は、ロック解放後に
+     parse_monex_raw.py で「その銘柄だけ」既存05パーサを実行し、data/output/{code}_financials.csv 等の
+     05銘柄別解析データを保存する(現在のRAWに対する解析済みデータがあれば再解析しない)。
+     解析は registry / target_codes.csv / fundamentals.csv / fundamental_scores.csv を変更しない
+     (解析できる ≠ 毎日取得する ≠ 05ランキング対象)。解析失敗は RAW 取得成功・終了コードに影響させず、
+     結果JSONの parse_status / parse_error と data/parse_status.csv にのみ記録する。topix_news は対象外。
+  8. 結果JSONを標準出力へ返す
 
 ページ種別(--page-type):
   zaimu      : 財務ページ(sa=report_zaimu)。05日次と同じRAW。既定。
@@ -51,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from monex_fetch_lock import LockTimeout, MonexFetchLock  # noqa: E402
 from monex_registry import CODE_RE, RAW_DIR, Registry, normalize_code, sha256_file  # noqa: E402
+import parse_monex_raw as pm  # noqa: E402  (zaimu RAW → 既存05パーサで1銘柄解析する薄いラッパー)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
@@ -281,7 +288,7 @@ def request_raw(project: str, codes: list[str], *, reason: str = "", run_id: str
                 mode: str = "on_demand", page_type: str = "zaimu", allow_fetch: bool = True,
                 allow_interactive_login: bool = False, lock_wait_sec: int = 900, db_path: Optional[Path] = None,
                 fetcher: Optional[Callable[..., tuple[int, FetcherResult]]] = None, keep_tmp: bool = False,
-                register_usage: bool = True) -> dict:
+                register_usage: bool = True, parse: bool = True, parser: Optional[Callable[..., dict]] = None) -> dict:
     if page_type not in PAGE_TYPES:
         raise ValueError(f"invalid page_type: {page_type}")
     if mode not in ("on_demand", "daily"):
@@ -322,7 +329,8 @@ def request_raw(project: str, codes: list[str], *, reason: str = "", run_id: str
                 st = reg.ensure_stock(code)
             r = {"code": code, "status": "", "raw_path": "", "raw_html_path": "", "shared_raw_path": "", "news_json_path": "",
                  "fetched_at": "", "raw_hash": "", "age_hours": None, "source": "", "effective_update_mode": st["effective_update_mode"],
-                 "stock_name": st.get("name") or "", "latest_period_in_raw": "", "monex_data_updated_at": "", "error": ""}
+                 "stock_name": st.get("name") or "", "latest_period_in_raw": "", "monex_data_updated_at": "", "error": "",
+                 "parse_status": "", "parse_error": "", "financials_csv": ""}
             results[code] = r
             if _mark_if_fresh(reg, project, run_id, code, page_type, max_age_hours, r):
                 continue
@@ -386,6 +394,13 @@ def request_raw(project: str, codes: list[str], *, reason: str = "", run_id: str
         except Exception as e:  # noqa: BLE001 - ビューは補助出力
             log(f"export_view failed: {e}")
 
+    # 財務RAW(zaimu)が確保できた銘柄だけ、fetch lock 解放後に05既存パーサで解析データを補完する。
+    # topix_news はここを通らない。parse失敗は ok / exit_code / registry fetch_status に影響させない。
+    if page_type == "zaimu" and parse:
+        for code in norm:
+            if results[code]["status"] in ("fresh", "fetched"):
+                _ensure_parsed(code, results[code], project, parser)
+
     out["results"] = [results[c] for c in norm]
     statuses = {r["status"] for r in out["results"]}
     out["ok"] = bool(norm) and statuses <= {"fresh", "fetched"}
@@ -397,6 +412,20 @@ def request_raw(project: str, codes: list[str], *, reason: str = "", run_id: str
     out["ended_at"] = now_str()
     log(f"END run_id={run_id} ok={out['ok']} exit={out['exit_code']} statuses={[ (r['code'], r['status']) for r in out['results'] ]}")
     return out
+
+
+def _ensure_parsed(code: str, r: dict, project: str, parser: Optional[Callable[..., dict]] = None) -> None:
+    """現在のRAWに対する05解析データが無ければ既存パーサで生成する(あれば何もしない)。
+    parse_monex_raw.parse_zaimu_raw が銘柄単位ロック+raw_hash再判定で多重実行を防ぐ。"""
+    fn = parser or pm.parse_zaimu_raw
+    try:
+        p = fn(code, source=f"request:{project}")
+    except Exception as e:  # noqa: BLE001 - 解析はRAW取得結果を壊さない(非致命)
+        p = {"status": "error", "error": f"{type(e).__name__}: {e}", "financials_csv": ""}
+    r["parse_status"] = p.get("status", "error")
+    r["parse_error"] = p.get("error", "") or ""
+    r["financials_csv"] = p.get("financials_csv", "") or ""
+    log(f"{code}: parse_status={r['parse_status']}" + (f" error={r['parse_error']}" if r["parse_error"] else ""))
 
 
 def _promote_zaimu(code: str, tmp_dir: Path, r: dict, reg: Registry, project: str, run_id: str) -> None:
@@ -477,6 +506,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--lock-wait-sec", type=int, default=900)
     ap.add_argument("--json-out", default="", help="結果JSONの保存先(省略時は標準出力のみ)")
     ap.add_argument("--keep-tmp", action="store_true")
+    ap.add_argument("--no-parse", action="store_true", help="zaimu取得後の05解析データ生成(parse_monex_raw)を行わない")
     ap.add_argument("--db", default=os.environ.get("MONEX_REGISTRY_DB", ""),
                     help="レジストリDBの明示指定(テスト用。通常は省略。環境変数 MONEX_REGISTRY_DB でも指定可)")
     args = ap.parse_args(argv)
@@ -491,7 +521,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         result = request_raw(args.project, codes, reason=args.reason, run_id=args.run_id, max_age_hours=args.max_age_hours,
                              mode=args.mode, page_type=args.page_type, allow_fetch=not args.no_fetch,
                              allow_interactive_login=args.allow_interactive_login, lock_wait_sec=args.lock_wait_sec,
-                             keep_tmp=args.keep_tmp, db_path=Path(args.db) if args.db else None)
+                             keep_tmp=args.keep_tmp, db_path=Path(args.db) if args.db else None, parse=not args.no_parse)
     except Exception as e:  # noqa: BLE001
         log(f"FATAL {type(e).__name__}: {e}")
         print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}", "exit_code": EXIT_FATAL}, ensure_ascii=False))

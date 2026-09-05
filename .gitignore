@@ -66,3 +66,6 @@ data/stock_registry_usage_view.csv
 data/locks/
 data/tmp_fetch/
 data/raw_topix/
+# 2026-09-05 取得済み財務RAWの05解析補完(parse_monex_raw.py)の生成物
+data/parse_status.csv
+data/tmp_parse/

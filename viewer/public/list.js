@@ -56,6 +56,10 @@
     registry_last_error: s.registry_last_error || "",
     active_projects: s.active_projects || [], // [{project,group,mode,mode_label,last_required,reason}]
     usages: s.usages || [],                    // active/inactive両方（履歴確認用）
+    // 05銘柄別解析データの状態(2026-09-05): parsed / raw_unparsed / raw_parse_error / raw_missing / ""
+    parse_state: s.parse_state || "",
+    parse_state_label: s.parse_state_label || "",
+    parse_error: s.parse_error || "",
     eff_group: (s.active_projects || []).map(p => p.group).sort().join(","),
   });
 
@@ -123,6 +127,15 @@
     if (!r.registry_present) return `<span class="muted">-</span>`;
     return `<button type="button" class="pin-btn ${r.pinned ? "pinned" : ""}" data-code="${r.code}" data-pinned="${r.pinned ? "1" : "0"}"
       title="${r.pinned ? "固定を解除する（他Projectの利用状況に応じた通常判定に戻る）" : "常に毎日取得するよう固定する"}">${r.pinned ? "📌" : "☆"}</button>`;
+  }
+
+  // 解析CSVが無い銘柄だけ「RAW未取得」「RAW取得済み / 05解析未生成」「05解析エラー」を明示する
+  // (解析済みなら通常どおり詳細画面へ遷移できるのでバッジは出さない)
+  function parseStateBadgeHtml(r) {
+    if (!r.parse_state || r.parse_state === "parsed") return "";
+    const cls = { raw_missing: "parse-missing", raw_unparsed: "parse-unparsed", raw_parse_error: "parse-error" }[r.parse_state] || "";
+    const title = r.parse_state === "raw_parse_error" && r.parse_error ? escAttr(r.parse_error) : escAttr(r.parse_state_label);
+    return `<span class="hold-badge ${cls}" title="${title}">${escHtml(r.parse_state_label)}</span>`;
   }
 
   function fetchStatusBadgeHtml(r) {
@@ -195,7 +208,7 @@
       <tr data-code="${r.code}">
         <td>${r.rankLabel}</td>
         <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${r.code}</a></td>
-        <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${escHtml(r.name || r.registry_name || "")}</a>${r.watch09 ? `<span class="hold-badge ${r.holding ? "hold" : "watch"}">${r.holding ? "保有" : "監視"}</span>` : ""}${r.fallback_used ? `<span class="hold-badge fallback" title="最新取得に失敗し、前回データを表示中">再取得待ち</span>` : ""}${r.code_source === "manual" ? `<span class="hold-badge manual" title="業績データ貼付機能で手動追加した銘柄です">手動</span>` : ""}${r.code_source === "registry_only" ? `<span class="hold-badge registry-only" title="fundamental_scores.csvには無く、共通RAW取得センターのみに存在する銘柄です">registry</span>` : ""}</td>
+        <td class="l"><a href="stock.html?code=${encodeURIComponent(r.code)}">${escHtml(r.name || r.registry_name || "")}</a>${r.watch09 ? `<span class="hold-badge ${r.holding ? "hold" : "watch"}">${r.holding ? "保有" : "監視"}</span>` : ""}${r.fallback_used ? `<span class="hold-badge fallback" title="最新取得に失敗し、前回データを表示中">再取得待ち</span>` : ""}${r.code_source === "manual" ? `<span class="hold-badge manual" title="業績データ貼付機能で手動追加した銘柄です">手動</span>` : ""}${r.code_source === "registry_only" ? `<span class="hold-badge registry-only" title="共通RAW取得センター(registry)が管理する銘柄で、05の日次取得・ランキング(fundamental_scores.csv)の対象ではありません">registry</span>` : ""}${parseStateBadgeHtml(r)}</td>
         <td class="l proj-cell">${projectBadgesHtml(r)}</td>
         <td>${modeBadgeHtml(r)}</td>
         <td>${pinCellHtml(r)}</td>

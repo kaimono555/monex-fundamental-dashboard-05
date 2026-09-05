@@ -328,10 +328,36 @@ on_demand / inactive は絶対に追記しない。取得後は `--after-fetch` 
 | 109 | `scripts/monex_scout_via_05.js` → 05 request（`topix_news`） | `monex_scout_client.js`（109専用ブラウザ CDP:9223）。`MONEX_SOURCE_109=legacy` で固定可 |
 | 104-3 | `handle_104_monex_fetch.ps1` → 05 request（project=104-3）→ `_shared_monex_raw` 読み戻し（従来どおり） | `scripts/monex/fetch_scouter_raw_104.js`（104-3専用ブラウザ CDP:9224）。`scripts/monex/USE_LEGACY_104_FETCH` マーカーで固定可 |
 
+### 取得済み財務RAWの05解析データ補完（2026-09-05 追加）
+
+**05が一度でも正常取得した Monex 財務RAW（`page_type=zaimu`）は、利用Project・更新モードに関係なく、既存05パーサで
+銘柄別解析データ（`data/output/{code}_financials.csv` / `data/output_extended/{code}_*.csv`）まで保存する。**
+ただし「解析できる」≠「毎日取得する」≠「05ランキング対象にする」は完全に別管理とする。
+
+* 解析は `scripts/parse_monex_raw.py`（薄いラッパー）が行う。解析ロジックは複製せず、既存
+  `parse_financials.ps1` / `parse_financials_extended.ps1` を `fetch_target_financials.ps1` と同じ引数で 1銘柄だけ実行する。
+  出力は `data/tmp_parse/` に書かせてから `os.replace` で正本へ原子的に置換（失敗時は前回CSVを触らない。ビューアが書き込み途中を読まない）。
+* `request_monex_raw.py` は zaimu で `fetched` / `fresh` になった銘柄について fetch lock 解放後に解析を補完する
+  （fresh RAW + 解析なし → Monexへ再取得せず parse のみ / fresh + 解析あり → 再解析しない）。`topix_news` は対象外。
+  結果JSONの `parse_status`（`parsed` / `exists` / `error`）・`parse_error` に記録し、`ok` / 終了コード / registry `fetch_status` には影響させない。
+* 解析状態は `data/parse_status.csv`（code / status / parsed_at / raw_hash / financials_rows / extended_status / error / source）で管理する。
+  SQLite schema・`fetch_log` は変更しない（`fetch_log` は従来どおり Monex 取得関連のみ）。
+* 多重実行防止: 銘柄単位ロック `data/locks/parse_{code}.lock`（`monex_fetch_lock` と同一プロトコル）を取り、ロック取得後に
+  `raw_hash` と `parse_status.csv` で再判定する（111/109/104-3 が同一銘柄をほぼ同時要求しても parser は1回）。
+* 解析は registry（stocks / project_usage）・`target_codes.csv`・`fundamentals.csv`・`fundamental_scores.csv` を変更しない。
+  `generate_fundamentals.ps1` は `target_codes.csv` を対象リストにするため、`data/output` にCSVが増えてもランキングには入らない。
+* バックフィル: `python scripts\parse_monex_raw.py --backfill [--dry-run]`（registry登録済み・`fetch_status=success`・正常zaimu RAWあり・
+  05解析なし の銘柄のみ。registry未登録の孤立RAWは `orphan_raw` として報告するだけで登録も削除もしない）。
+  単体: `python scripts\parse_monex_raw.py --codes 4275[,...] [--force]`。Monexへはアクセスしない。
+* ビューア: `apiStock` は解析CSVが無い場合も registry の状態で `raw_missing`（RAW未取得）/ `raw_unparsed`（RAW取得済み / 05解析未生成）/
+  `raw_parse_error` を区別して返す。registry が取得したRAWを解析しただけの銘柄は一覧で `registry`（`code_source=registry_only`）として
+  扱い「手動追加」とは表示しない。詳細画面では `registry / ランキング対象外` バッジで 05ランキング対象（`ranking_target`）と区別する。
+
 ### テスト
 
 ```powershell
-python -m unittest tests.test_monex_registry tests.test_request_monex_raw tests.test_registry_daily_sync
+python -m unittest tests.test_monex_registry tests.test_request_monex_raw tests.test_registry_daily_sync tests.test_parse_monex_raw
+node tests\test_viewer_registry_merge.js
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\test_parse_financials_headers.ps1
 ```
 

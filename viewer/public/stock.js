@@ -3,7 +3,29 @@
   const code = new URLSearchParams(location.search).get("code");
   if (!code) { document.getElementById("head").textContent = "コード未指定"; return; }
   const res = await fetch(`/api/stock/${encodeURIComponent(code)}`);
-  if (!res.ok) { document.getElementById("head").textContent = `データが見つかりません (${code})`; return; }
+  const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  // registry(共通RAW取得センター)由来のバッジ: 更新モード・利用Project(表示のみ)
+  const registryBadges = reg => !reg || !reg.registry_present ? "" :
+    `<span class="badge badge-registry" title="共通RAW取得センター(registry)の更新モード">${esc(reg.effective_update_mode_label)}</span>` +
+    (reg.active_projects || []).map(p => `<span class="badge badge-registry" title="${esc(p.project)}: ${esc(p.mode_label)}${p.reason ? " (" + esc(p.reason) + ")" : ""}">${esc(p.group)}</span>`).join("");
+  if (!res.ok) {
+    // 2026-09-05: 解析CSVが無い場合も、registryの状態で「RAW未取得」「RAW取得済み / 05解析未生成」を区別して表示する
+    const e = await res.json().catch(() => ({}));
+    const reg = e.registry || null;
+    const rname = reg ? reg.registry_name : "";
+    const msg = e.parse_state_label
+      ? `${e.parse_state_label}${e.parse_state === "raw_parse_error" && e.parse_error ? `<div class="muted" style="font-size:12px;margin-top:4px">${esc(e.parse_error)}</div>` : ""}`
+      : `データが見つかりません (${esc(code)})`;
+    document.getElementById("head").innerHTML = `
+      <span class="code">${esc(code)}</span><span class="name">${esc(rname)}</span>${registryBadges(reg)}
+      <div class="muted" style="margin-top:8px">${msg}</div>
+      ${e.parse_state === "raw_unparsed" || e.parse_state === "raw_parse_error"
+        ? `<div class="muted" style="font-size:12px;margin-top:4px">05解析データを生成するには: <code>python scripts\\parse_monex_raw.py --codes ${esc(code)}</code>（Monexへは再アクセスしません）</div>` : ""}
+      ${e.parse_state === "raw_missing"
+        ? `<div class="muted" style="font-size:12px;margin-top:4px">Monex財務RAWがまだ取得されていません。取得要求（request_monex_raw.py）後に解析データが生成されます。</div>` : ""}`;
+    document.title = `${code} ${rname} | 05 ローカルビューア`;
+    return;
+  }
   const d = await res.json();
 
   const C = { c1: "#3B6FC9", c2: "#C4661C", c3: "#1F9E77", c4: "#A054C8" };
@@ -11,15 +33,19 @@
   const fmt = v => v == null || v === "" || isNaN(v) ? "-" : Number(v).toLocaleString("ja-JP");
 
   // ---- ヘッダー ----
-  const name = (d.fundamentals && d.fundamentals.name) || (d.score && d.score.name) || d.manual_name || "";
+  const reg = d.registry || null;
+  const name = (d.fundamentals && d.fundamentals.name) || (d.score && d.score.name) || d.manual_name || (reg && reg.registry_name) || "";
   const asOf = d.fundamentals ? d.fundamentals.data_as_of : "";
   document.title = `${code} ${name} | 05 ローカルビューア`;
   // code_source="manual"は自動取得(target_codes.csv)に組み込み済みの元手動貼付銘柄、
   // viewer_computedはまだ組み込み前（ビューアがその場でスコア再算出中）の手動貼付銘柄を示す。
-  const isManualOrigin = (d.fundamentals && d.fundamentals.code_source === "manual") || (d.score && d.score.viewer_computed);
+  // registryが取得したRAWを解析しただけの銘柄(05ランキング対象外)は「手動追加」ではない。
+  const isRegistryOnly = !d.ranking_target && !d.manual_name && !!(reg && reg.registry_present);
+  const isManualOrigin = (d.fundamentals && d.fundamentals.code_source === "manual") || (d.score && d.score.viewer_computed && !isRegistryOnly);
   document.getElementById("head").innerHTML = `
     <span class="code">${code}</span><span class="name">${name}</span>
     ${isManualOrigin ? `<span class="badge" title="業績データ貼付機能で手動追加した銘柄です">手動追加</span>` : ""}
+    ${isRegistryOnly ? `<span class="badge badge-registry" title="共通RAW取得センターが取得したRAWから解析した銘柄です。05の日次取得・ランキング(fundamental_scores.csv)の対象ではありません">registry / ランキング対象外</span>${registryBadges(reg)}` : ""}
     ${asOf ? `<span class="badge">決算期 ${asOf}</span>` : ""}
     ${d.fundamentals && d.fundamentals.fetched_at ? `<span class="badge">取得 ${d.fundamentals.fetched_at}</span>` : ""}
     ${d.manual_updated_at ? `<span class="badge">手動更新 ${d.manual_updated_at}</span>` : ""}`;

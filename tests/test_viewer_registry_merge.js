@@ -8,7 +8,8 @@
  */
 "use strict";
 const assert = require("assert");
-const { mergeRegistryIntoList, computeRegistrySummary, formatRegistryFields } = require("../viewer/server.js");
+const { mergeRegistryIntoList, computeRegistrySummary, formatRegistryFields,
+  computeParseState, attachParseState, resolveOutputCodeSource } = require("../viewer/server.js");
 
 let pass = 0, fail = 0;
 function check(name, fn) {
@@ -155,6 +156,52 @@ check("merge: code not present in registry at all gets safe empty defaults (no c
   assert.strictEqual(merged[0].registry_present, false);
   assert.strictEqual(merged[0].effective_update_mode_label, "-");
   assert.deepStrictEqual(merged[0].active_projects, []);
+});
+
+// ── 2026-09-05: 05銘柄別解析データの状態表示（RAW未取得 / RAW取得済み・解析未生成 / 解析済み） ──
+check("parse state: financials csv present -> parsed (registry有無に関わらず)", () => {
+  assert.strictEqual(computeParseState({ hasFinancialsCsv: true, registryPresent: true, rawPresent: true, parseRow: null }).parse_state, "parsed");
+  assert.strictEqual(computeParseState({ hasFinancialsCsv: true, registryPresent: false, rawPresent: false, parseRow: null }).parse_state, "parsed");
+});
+
+check("parse state: registry + RAWあり + 解析CSVなし -> raw_unparsed / parse error -> raw_parse_error", () => {
+  const s = computeParseState({ hasFinancialsCsv: false, registryPresent: true, rawPresent: true, parseRow: null });
+  assert.strictEqual(s.parse_state, "raw_unparsed");
+  assert.strictEqual(s.parse_state_label, "RAW取得済み / 05解析未生成");
+  const e = computeParseState({ hasFinancialsCsv: false, registryPresent: true, rawPresent: true,
+    parseRow: { code: "4275", status: "error", error: "PARSER_SCHEMA_MISMATCH", parsed_at: "2026-09-05 10:00:00" } });
+  assert.strictEqual(e.parse_state, "raw_parse_error");
+  assert.strictEqual(e.parse_error, "PARSER_SCHEMA_MISMATCH");
+});
+
+check("parse state: registry + RAWなし -> raw_missing / registry未登録・CSVなし -> 空(従来どおり)", () => {
+  const m = computeParseState({ hasFinancialsCsv: false, registryPresent: true, rawPresent: false, parseRow: null });
+  assert.strictEqual(m.parse_state, "raw_missing");
+  assert.strictEqual(m.parse_state_label, "RAW未取得");
+  const n = computeParseState({ hasFinancialsCsv: false, registryPresent: false, rawPresent: false, parseRow: null });
+  assert.strictEqual(n.parse_state, "");
+  assert.strictEqual(n.parse_state_label, "");
+});
+
+check("output csv origin: registry登録銘柄は「手動追加」にしない / 手動貼付は manual のまま", () => {
+  const ctx = { manualNames: new Map([["7826", "フルヤ金属"]]), manualFunds: new Map([["5803", {}]]), regByCode: new Map([["4275", {}], ["7826", {}], ["5803", {}]]) };
+  assert.strictEqual(resolveOutputCodeSource("4275", ctx), "registry_only");
+  assert.strictEqual(resolveOutputCodeSource("7826", ctx), "manual");   // manual_names 優先
+  assert.strictEqual(resolveOutputCodeSource("5803", ctx), "manual");   // manual_fundamentals 優先
+  assert.strictEqual(resolveOutputCodeSource("1111", ctx), "manual");   // どちらにも無い旧来CSV
+});
+
+check("attachParseState: 一覧行へ付与、英数字コード 285A を文字列のまま扱う", () => {
+  const list = [{ code: "285A", name: "キオクシア", rank: "3" }, { code: "4275", name: "" }];
+  const registryStocks = [regRow({ code: "4275", name: "カーリット", effective_update_mode: "on_demand", raw_present: "1" })];
+  const merged = mergeRegistryIntoList(list, registryStocks, new Map([["4275", [usageRow({ code: "4275", project: "104-3", requested_mode: "on_demand" })]]]));
+  const rows = attachParseState(merged, new Set(["285A"]), new Map());
+  assert.strictEqual(rows[0].code, "285A");
+  assert.strictEqual(rows[0].parse_state, "parsed");
+  assert.strictEqual(rows[1].parse_state, "raw_unparsed");
+  assert.strictEqual(rows[1].effective_update_mode, "on_demand"); // 解析状態の付与は registry の判定を変えない
+  const rows2 = attachParseState(merged, new Set(["285A", "4275"]), new Map([["4275", { status: "success" }]]));
+  assert.strictEqual(rows2[1].parse_state, "parsed");
 });
 
 console.log(`\n==== viewer registry merge test: PASS=${pass} FAIL=${fail} ====`);

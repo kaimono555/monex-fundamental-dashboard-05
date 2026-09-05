@@ -204,6 +204,11 @@ table.list th .score-help:hover { background: var(--brand-yellow); color: var(--
 .fs-badge.fs-ok { background: #e2f2e5; color: #1d7a3a; border: 1px solid #b6dfc0; }
 .fs-badge.fs-err { background: #fbecec; color: #a33; border: 1px solid #e0b4b4; }
 .hold-badge.registry-only { background: #f6ecf9; color: #7a2ea3; border: 1px solid #e3c9ec; }
+/* 05銘柄別解析データの状態(2026-09-05): RAW未取得 / RAW取得済み・解析未生成 / 解析エラー */
+.hold-badge.parse-missing { background: #eeeeea; color: #6a6a62; border: 1px solid #d5d5cc; }
+.hold-badge.parse-unparsed { background: #fdf1de; color: #a5680f; border: 1px solid #eed3a8; }
+.hold-badge.parse-error { background: #fbecec; color: #a33; border: 1px solid #e0b4b4; }
+.stock-head .badge.badge-registry { background: #f6ecf9; color: #7a2ea3; border: 1px solid #e3c9ec; }
 
 /* 管理ボタン・展開パネル */
 .manage-btn {
