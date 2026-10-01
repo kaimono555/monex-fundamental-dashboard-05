@@ -113,7 +113,28 @@ function compactForLog(text, maxLength = 500) {
     .slice(0, maxLength);
 }
 
+// 2026-10-01: 銘柄ごとに context.newPage() で新規タブを開くと、画面付きChromeが毎回ウィンドウを
+// 前面化し、取得中(約10秒おき)にユーザーの文字入力フォーカスを奪っていた。
+// 取得用タブを1つだけ開いて使い回す(前面化は最初の1回だけ)。リトライ時(attempt>=2)は
+// 壊れたタブを引きずらないよう実際に閉じて作り直す。last good RAW 保護・認証判定・
+// 銘柄コード一致検証は従来どおり(page.goto 後の本文に対して行う)。
+let sharedWorkPage = null;
+let sharedWorkContext = null; // 使い回しタブを開いた context(別 context へは持ち越さない)
+async function acquireWorkPage(context, forceNew) {
+  if (sharedWorkPage && (forceNew || sharedWorkContext !== context || sharedWorkPage.isClosed())) {
+    const old = sharedWorkPage;
+    sharedWorkPage = null;
+    try { if (!old.isClosed()) await old.close(); } catch (_) { /* ignore */ }
+  }
+  if (!sharedWorkPage) {
+    sharedWorkPage = await context.newPage();
+    sharedWorkContext = context;
+  }
+  return sharedWorkPage;
+}
+
 async function closePageQuietly(page) {
+  if (page && page === sharedWorkPage) return; // 使い回しタブは閉じない(次の銘柄で再利用)
   if (!page) return;
   try {
     if (!page.isClosed()) await page.close();
@@ -270,7 +291,7 @@ async function fetchOne(context, code, rawDir, logPath, maxRetries, retryDelayMs
       break;
     }
     try {
-      page = await context.newPage();
+      page = await acquireWorkPage(context, attempt > 1);
       writeRunLog(logPath, `fetch start code=${code} attempt=${attempt}/${maxRetries} url=${url}`);
       const remainingBeforeGoto = Math.max(1, deadlineMs - Date.now());
       const response = await withTimeout(
@@ -780,6 +801,12 @@ async function main() {
     // (親のPowerShellが待ち続け、generate以降が実行されない)。
     // browser.close()は外部起動(detached)ChromeへのCDP接続では「切断」のみで、
     // Chrome本体(CDP:9222)とログイン状態はそのまま残る。
+    // 使い回した取得用タブはバッチ終了時に閉じる(従来は銘柄ごとに閉じていた。タブを残して増やさない)
+    if (sharedWorkPage) {
+      const wp = sharedWorkPage;
+      sharedWorkPage = null;
+      await closePageQuietly(wp);
+    }
     try {
       await browser.close();
       writeRunLog(logPath, "batch fetch: CDP接続を切断しました(Chrome本体は開いたまま維持)");
